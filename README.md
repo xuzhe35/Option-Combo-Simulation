@@ -2098,6 +2098,21 @@ The runner uses an explicit suite list in `tests/run.js`, currently covering
 the top-level `tests/*.test.js` files. Register new suites there; it does not
 automatically discover files. Coverage includes forward-carry and pricing context.
 
+The runner also type-checks the modules listed in `tsconfig.json` (currently
+`js/pricing_core.js` and `js/cost_basis_fop_core.js`) under TypeScript
+`strict`, through JSDoc annotations and `// @ts-check`. Nothing is compiled or
+emitted: the pages keep loading the same `.js` files. The compiler is a dev
+dependency, installed once per checkout:
+
+```sh
+npm install
+npx tsc -p tsconfig.json
+```
+
+Without it, `tests/run.js` reports the type-check suite as failed rather than
+skipping it. `types/globals.d.ts` describes the cross-script globals the checked
+modules consume.
+
 It currently runs the suites wired into `tests/run.js`, including:
 
 - market holidays

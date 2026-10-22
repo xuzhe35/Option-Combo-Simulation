@@ -223,6 +223,7 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 - `js/ws_client.js` is the main transport layer for both live and historical flows in the portfolio workspace.
 - `chart_lab.html` / `js/chart_lab.js` are experimental and should be treated separately from the main app shell.
 - `iv_term_structure.html` / `js/iv_term_structure.js` are a standalone monitor; keep DOM-free selection and aggregation logic in `js/iv_term_structure_core.js` and `iv_term_structure_service.py`.
+- Type checking (pilot): the scripts listed in `tsconfig.json` start with `// @ts-check` and carry JSDoc types checked under TypeScript `strict`; `tests/run.js` runs `tsc --noEmit` over them (`npm install` once for the dev-only compiler). Nothing is emitted, so never add a build step or `.ts` source for a page. Keep a checked module at zero errors; a `/** @type {T} */ (expr)` cast states an invariant the checker cannot see, so say which in a comment. Cross-script globals they consume are typed in `types/globals.d.ts`; a module joins by adding `// @ts-check` and its path to `tsconfig.json`, without changing runtime code.
 
 ## Backend Notes
 

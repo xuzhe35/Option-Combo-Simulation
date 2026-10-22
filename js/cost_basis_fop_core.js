@@ -1,3 +1,4 @@
+// @ts-check
 // Standalone FOP ledger core: replay, economic P&L, seller lens, cycles and
 // read-time ROLL groups (CODE PLAN/COST_BASIS_FOP_STANDALONE_PLAN.md §5, §6,
 // §9.2, §13.2). DOM-free; the FOP page loads it after the common layer.
@@ -16,10 +17,276 @@
 (function (globalScope) {
     'use strict';
 
+    // ------------------------------------------------------------------
+    // Types. The graph types are the parts of BackupPayloadV2
+    // (contract/protocol.json) this module reads; their nullability follows
+    // the protocol's FopEvent variants, which the server enforces on write.
+    // ------------------------------------------------------------------
+
+    /**
+     * @typedef {{value: number, reason: null} | {value: null, reason: string}} Metric
+     * A figure or the reason it is unknown; never both.
+     */
+
+    /**
+     * @typedef {object} FutContractRecord
+     * @property {'FUT'} secType
+     * @property {string} contractId
+     * @property {number} revision
+     * @property {string} root
+     * @property {string} currency
+     * @property {string | null} localSymbol
+     * @property {string} futureContractMonth
+     * @property {number} futurePointValue
+     */
+
+    /**
+     * @typedef {object} FopContractRecord
+     * @property {'FOP'} secType
+     * @property {string} contractId
+     * @property {number} revision
+     * @property {string} root
+     * @property {string} currency
+     * @property {string | null} localSymbol
+     * @property {'C' | 'P'} optionRight
+     * @property {number} optionStrike
+     * @property {string} optionExpiry
+     * @property {number} premiumMultiplier
+     */
+
+    /** @typedef {FutContractRecord | FopContractRecord} ContractRecord */
+
+    /**
+     * @typedef {'futures_trade' | 'option_trade' | 'option_assignment' | 'option_exercise'
+     *     | 'option_expiry' | 'opening_balance' | 'fee' | 'manual_adjust'} EventKind
+     */
+
+    /**
+     * @typedef {object} StoredEvent
+     * @property {string | null} primarySourceId
+     * @property {object} row
+     * @property {string} row.eventId
+     * @property {EventKind} row.kind
+     * @property {number | null} row.contracts
+     * @property {number | null} row.futureContracts
+     * @property {number | null} row.price
+     * @property {number} row.cashAmount
+     * @property {number} row.fees
+     * @property {boolean} row.includeInCost
+     * @property {string | null} row.externalRef
+     * @property {string | null} row.voidedAtUtc
+     * @property {object} row.fop
+     * @property {ContractRef | null} row.fop.contractRef
+     * @property {ContractRef | null} row.fop.deliveredContractRef
+     * @property {'O' | 'C' | 'CO' | null} row.fop.openClose
+     * @property {string | null} row.fop.feeCategory
+     * @property {string | null} row.fop.feeSourceEventId
+     * @property {string | null} row.fop.adjustmentScope
+     * @property {string | null} row.fop.baselineKind
+     * @property {string | null} row.fop.baselineAsOfUtc
+     * @property {object} row.fop.time
+     * @property {string | null} row.fop.time.executedAtUtc
+     * @property {TimeRange | null} row.fop.time.timeRange
+     * @property {string | null} row.fop.time.orderEvidence
+     */
+
+    /**
+     * @typedef {object} CycleRecord
+     * @property {string} boundaryId
+     * @property {'closed' | 'revoked'} state
+     * @property {string | null} anchorEventId
+     * @property {number | null} [supersededByRevision]
+     */
+
+    /**
+     * @typedef {object} BindingRecord
+     * @property {string} optionContractId
+     * @property {string | null} futureContractId
+     * @property {string} status
+     * @property {number | null} [supersededByRevision]
+     */
+
+    /**
+     * The ledger graph (BackupPayloadV2); the module reads only these parts.
+     * @typedef {object} LedgerGraph
+     * @property {{historyScope: 'full_history' | 'since_baseline'} | null} [fopBook]
+     * @property {{record: ContractRecord}[]} [contracts]
+     * @property {BindingRecord[]} [bindings]
+     * @property {{sourceId: string, namespace: string, sourceRef: string}[]} [sources]
+     * @property {{sourceId: string, eventId: string}[]} [allocations]
+     * @property {StoredEvent[]} [events]
+     * @property {CycleRecord[]} [cycles]
+     */
+
+    /** @typedef {{contractId: string, revision: number}} ContractRef */
+    /** @typedef {{startUtc: string, endUtc: string}} TimeRange */
+    /** @typedef {{scope: string, sequence: number}} OrderEvidence */
+    /** @typedef {string | number | null | undefined} KeyPart */
+
+    /**
+     * One contract's quantity change from an event.
+     * @typedef {object} Delta
+     * @property {string} key 'FUT:id' or 'FOP:id'
+     * @property {string} id
+     * @property {'FUT' | 'FOP'} secType
+     * @property {number} delta
+     */
+
+    /**
+     * Fields every event view has, whatever its kind.
+     * @typedef {object} EventViewBase
+     * @property {string} id
+     * @property {[string, string]} interval
+     * @property {number} cash
+     * @property {number} fees
+     * @property {boolean} includeInCost
+     * @property {'O' | 'C' | 'CO' | null} openClose
+     * @property {string | null} feeCategory
+     * @property {string | null} feeSourceEventId
+     * @property {string | null} adjustmentScope
+     * @property {string | null} baselineKind
+     * @property {string | null} baselineAsOfUtc
+     * @property {OrderEvidence | null} evidence
+     * @property {string[]} sourceIds
+     * @property {KeyPart[]} key
+     * @property {Delta[]} deltas
+     */
+
+    /**
+     * @typedef {EventViewBase & {kind: 'futures_trade', contract: FutContractRecord, delivered: null,
+     *     contracts: null, futureContracts: number, price: number}} FuturesTradeView
+     */
+
+    /**
+     * An event as replay sees it; the kind fixes which quantities and
+     * contracts it carries (protocol FopEvent variants).
+     * @typedef {FuturesTradeView
+     *     | EventViewBase & {kind: 'option_trade', contract: FopContractRecord, delivered: null,
+     *         contracts: number, futureContracts: null, price: number}
+     *     | EventViewBase & {kind: 'option_assignment' | 'option_exercise', contract: FopContractRecord,
+     *         delivered: FutContractRecord, contracts: number, futureContracts: number, price: number}
+     *     | EventViewBase & {kind: 'option_expiry', contract: FopContractRecord, delivered: null,
+     *         contracts: number, futureContracts: null, price: null}
+     *     | EventViewBase & {kind: 'opening_balance', contract: ContractRecord, delivered: null,
+     *         contracts: number | null, futureContracts: number | null, price: number | null}
+     *     | EventViewBase & {kind: 'fee' | 'manual_adjust', contract: null, delivered: null,
+     *         contracts: null, futureContracts: null, price: null}} EventView
+     */
+
+    /**
+     * @typedef {object} ReadGraph
+     * @property {string} scope
+     * @property {Map<string, ContractRecord>} contracts
+     * @property {Map<string, BindingRecord>} bindings
+     * @property {EventView[]} events
+     * @property {CycleRecord[]} cycles
+     */
+
+    /**
+     * @typedef {object} Timeline
+     * @property {EventView[]} ordered
+     * @property {Map<string, string[]>} groupOf
+     * @property {Map<string, string>} taints
+     * @property {{code: string, eventId: string, contracts: string[]}[]} problems
+     * @property {{start: string, proven: string[], ambiguous: [string, string][]}[]} groups
+     */
+
+    /**
+     * @typedef {object} Placement
+     * @property {Map<string, number>} cycleOf
+     * @property {(id: string) => number} cycleIndex
+     * @property {Map<string, number>} straddling
+     * @property {number} current
+     * @property {CycleRecord[]} boundaries
+     */
+
+    /** @typedef {{cycle: number, affected?: undefined} | {cycle?: undefined, affected: number[]}} Target */
+    /** @typedef {'Rf' | 'Co' | 'E' | 'J' | 'Rs' | 'Es' | 'Js' | 'Rb' | 'Eb'} BucketName */
+    /** @typedef {Partial<Record<BucketName, string>>} BucketRisk */
+    /** @typedef {Record<BucketName, Metric> & {longExercise: boolean}} Buckets */
+
+    /**
+     * @typedef {object} FutureState
+     * @property {FutContractRecord} record
+     * @property {number} q
+     * @property {number | null} average null exactly when q is 0
+     * @property {number} realized
+     * @property {boolean} closedAny
+     * @property {string | null} taint
+     * @property {string | null} quantityReason
+     */
+
+    /**
+     * @typedef {object} OptionState
+     * @property {FopContractRecord} record
+     * @property {number} n
+     * @property {number} premium
+     * @property {string | null} premiumReason
+     * @property {string | null} taint
+     * @property {string | null} quantityReason
+     */
+
+    /**
+     * @typedef {object} CycleEconomics
+     * @property {number} index
+     * @property {string | null} startsAfterBoundaryId
+     * @property {string | null} closedByBoundaryId
+     * @property {Buckets} buckets
+     * @property {string | null} pnlReason
+     * @property {string | null} lensReason
+     */
+
+    /**
+     * @typedef {object} Economics
+     * @property {Map<string, FutureState>} futures
+     * @property {Map<string, OptionState>} options
+     * @property {CycleEconomics[]} cycles
+     * @property {Buckets} book
+     * @property {{E: Metric, J: Metric}} unattributed
+     * @property {Metric} openingValue
+     * @property {string[]} baselineReasons
+     * @property {object[]} steps
+     */
+
+    /**
+     * A FUT trade's closing or opening part (deriveRolls).
+     * @typedef {object} Segment
+     * @property {FuturesTradeView} event
+     * @property {FutContractRecord} record
+     * @property {number} sign
+     * @property {string} classKey
+     * @property {'close' | 'open'} side
+     * @property {number} quantity
+     * @property {number} left
+     * @property {number} direction
+     */
+
+    /**
+     * The parts of FopLedgerOutput that gapsOf() reads.
+     * @typedef {object} GapSource
+     * @property {{history: string, openingValue: Metric}} scope
+     * @property {{contracts: Metric}[]} futures
+     * @property {{contracts: Metric, remainingNetPremium: Metric}[]} options
+     * @property {{realized: Metric}[]} realizedByContract
+     * @property {Record<string, Metric>} totals
+     * @property {Record<string, Metric | boolean>} sellerLens
+     * @property {Record<string, Metric>} buyerOptions
+     */
+
+    /**
+     * @typedef {object} ComputeOptions
+     * @property {Record<string, number | null> | null} [marks]
+     * @property {string | null} [asOf]
+     * @property {{fromUtc?: string | null, toUtc?: string | null} | null} [rollRange]
+     * @property {boolean} [rolls]
+     * @property {boolean} [trace]
+     */
+
     const ENGINE_VERSION = 1;
     const EPSILON = 1e-9;
     const DELIVERY_KINDS = new Set(['option_assignment', 'option_exercise']);
     const ORDER_EVIDENCE = /^([^#]+)#([0-9]{1,15})$/;
+    /** @type {Set<string | null>} */
     const SELLER_FEE_CATEGORIES = new Set(['futures', 'short_option']);
     // A fee of the buyer's options alone (plan §5.3: kept out of the seller lens).
     const BUYER_FEE_CATEGORY = 'long_option';
@@ -28,24 +295,37 @@
     // Metrics
     // ------------------------------------------------------------------
 
-    const known = (value) => ({ value, reason: null });
-    const unknown = (reason) => ({ value: null, reason });
+    const known = (/** @type {number} */ value) => ({ value, reason: null });
+    const unknown = (/** @type {string} */ reason) => ({ value: null, reason });
 
-    /** A running sum that turns unknown, with the first reason, once any part is. */
+    /**
+     * A running sum that turns unknown, with the first reason, once any part is.
+     * @returns {Metric}
+     */
     function createSum() {
         return { value: 0, reason: null };
     }
 
+    /**
+     * @param {Metric} sum
+     * @param {number | null} amount null only with a reason, which leaves it unread
+     * @param {string | null} reason
+     */
     function addTo(sum, amount, reason) {
         if (sum.reason !== null) return;
         if (reason) {
-            sum.value = null;
-            sum.reason = reason;
+            // The sum turns from known to unknown: both fields change together.
+            /** @type {{value: null}} */ (/** @type {unknown} */ (sum)).value = null;
+            /** @type {{reason: string}} */ (/** @type {unknown} */ (sum)).reason = reason;
             return;
         }
-        sum.value += amount;
+        sum.value += /** @type {number} */ (amount);
     }
 
+    /**
+     * @param {Array<[number, Metric]>} parts
+     * @returns {Metric}
+     */
     function combine(parts) {
         // Σ sign × metric; the first unknown part names the reason.
         let total = 0;
@@ -60,6 +340,10 @@
     // The stable key and order evidence (plan §9.2)
     // ------------------------------------------------------------------
 
+    /**
+     * @param {KeyPart} left
+     * @param {KeyPart} right
+     */
     function compareValues(left, right) {
         if (left === right) return 0;
         if (left === null || left === undefined) return -1;
@@ -70,6 +354,10 @@
         return a < b ? -1 : (a > b ? 1 : 0);
     }
 
+    /**
+     * @param {KeyPart[]} left
+     * @param {KeyPart[]} right
+     */
     function compareKeys(left, right) {
         for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
             const order = compareValues(left[index], right[index]);
@@ -78,6 +366,10 @@
         return 0;
     }
 
+    /**
+     * @param {string | null | undefined} text
+     * @returns {OrderEvidence | null}
+     */
     function parseOrderEvidence(text) {
         const match = ORDER_EVIDENCE.exec(text || '');
         return match ? { scope: match[1], sequence: Number(match[2]) } : null;
@@ -87,6 +379,10 @@
     // Reading the graph
     // ------------------------------------------------------------------
 
+    /**
+     * @param {LedgerGraph} graph
+     * @returns {ReadGraph}
+     */
     function readGraph(graph) {
         // Events keep the revision they reference; a live event always holds
         // the current one (the server moves it on every correction).
@@ -120,19 +416,30 @@
         };
     }
 
+    /**
+     * @param {StoredEvent} stored
+     * @param {Map<string, ContractRecord>} contracts
+     * @param {Map<string, {sourceId: string, namespace: string, sourceRef: string}>} sources
+     * @param {Map<string, {sourceId: string, eventId: string}[]>} allocations
+     * @returns {EventView}
+     */
     function eventView(stored, contracts, sources, allocations) {
         const row = stored.row;
         const fop = row.fop;
         const time = fop.time;
+        // A time is an instant or a range, exactly one (protocol TimeFacts).
         const interval = time.executedAtUtc
             ? [time.executedAtUtc, time.executedAtUtc]
-            : [time.timeRange.startUtc, time.timeRange.endUtc];
-        const lookup = (ref) => (ref ? contracts.get(`${ref.contractId}#${ref.revision}`) || null : null);
+            : [/** @type {TimeRange} */ (time.timeRange).startUtc, /** @type {TimeRange} */ (time.timeRange).endUtc];
+        const lookup = (/** @type {ContractRef | null} */ ref) => (
+            ref ? contracts.get(`${ref.contractId}#${ref.revision}`) || null : null);
         const primary = stored.primarySourceId ? sources.get(stored.primarySourceId) : null;
         let sourceKey = '';
         if (primary) sourceKey = `${primary.namespace}:${primary.sourceRef}`;
         else if (row.externalRef) sourceKey = `manual:${row.externalRef}`;
-        const view = {
+        // The row's kind fixes which fields it carries (protocol FopEvent), and
+        // a stored row's contract references resolve; key and deltas follow.
+        const view = /** @type {EventView} */ ({
             id: row.eventId,
             kind: row.kind,
             interval,
@@ -152,25 +459,32 @@
             baselineAsOfUtc: fop.baselineAsOfUtc,
             evidence: parseOrderEvidence(time.orderEvidence),
             sourceIds: (allocations.get(row.eventId) || []).map((allocation) => allocation.sourceId),
-        };
+        });
         view.key = [sourceKey, row.kind, row.futureContracts, row.contracts, row.price,
             row.cashAmount, row.fees, row.eventId];
         view.deltas = eventDeltas(view);
         return view;
     }
 
-    /** [{key: 'FUT:id' | 'FOP:id', id, secType, delta}] of one event. */
+    /**
+     * [{key: 'FUT:id' | 'FOP:id', id, secType, delta}] of one event.
+     * @param {EventView} event
+     * @returns {Delta[]}
+     */
     function eventDeltas(event) {
         if (event.kind === 'fee' || event.kind === 'manual_adjust') return [];
-        const id = event.contract ? event.contract.contractId : null;
+        // Every other kind names its contract and the quantities its kind
+        // carries; an opening balance holds exactly one of the two.
+        const id = /** @type {string} */ (event.contract ? event.contract.contractId : null);
         if (event.kind === 'futures_trade'
             || (event.kind === 'opening_balance' && event.futureContracts !== null)) {
-            return [{ key: `FUT:${id}`, id, secType: 'FUT', delta: event.futureContracts }];
+            return [{ key: `FUT:${id}`, id, secType: 'FUT', delta: /** @type {number} */ (event.futureContracts) }];
         }
-        const deltas = [{ key: `FOP:${id}`, id, secType: 'FOP', delta: event.contracts }];
+        /** @type {Delta[]} */
+        const deltas = [{ key: `FOP:${id}`, id, secType: 'FOP', delta: /** @type {number} */ (event.contracts) }];
         if (DELIVERY_KINDS.has(event.kind) && event.delivered) {
             deltas.push({ key: `FUT:${event.delivered.contractId}`, id: event.delivered.contractId,
-                secType: 'FUT', delta: event.futureContracts });
+                secType: 'FUT', delta: /** @type {number} */ (event.futureContracts) });
         }
         return deltas;
     }
@@ -179,6 +493,10 @@
     // Pass 1: economic order and quantities (plan §9.2)
     // ------------------------------------------------------------------
 
+    /**
+     * @param {number} position
+     * @param {number[]} deltas
+     */
     function orderIndependent(position, deltas) {
         const signs = new Set(deltas.map((delta) => (delta > 0 ? 1 : -1)));
         if (signs.size !== 1) return false;
@@ -187,15 +505,21 @@
         return Math.abs(deltas.reduce((sum, delta) => sum + delta, 0)) <= Math.abs(position) + EPSILON;
     }
 
+    /**
+     * @param {EventView[]} events
+     * @returns {EventView[][]}
+     */
     function ambiguityGroups(events) {
         const ordered = events.slice().sort((a, b) => compareKeys(
             [a.interval[0], a.interval[1], ...a.key], [b.interval[0], b.interval[1], ...b.key]));
         const groups = [];
+        /** @type {string | null} */
         let latestEnd = null;
         for (const event of ordered) {
-            if (groups.length && event.interval[0] <= latestEnd) {
+            // latestEnd is set once there is a group.
+            if (groups.length && event.interval[0] <= /** @type {string} */ (latestEnd)) {
                 groups[groups.length - 1].push(event);
-                if (event.interval[1] > latestEnd) latestEnd = event.interval[1];
+                if (event.interval[1] > /** @type {string} */ (latestEnd)) latestEnd = event.interval[1];
             } else {
                 groups.push([event]);
                 latestEnd = event.interval[1];
@@ -208,6 +532,10 @@
      * The group in order, the ids the evidence orders (in its order), and the
      * contracts whose order no evidence fixes. Evidence that puts an event
      * after one that ended before it started orders nothing.
+     * @param {EventView[]} group
+     * @param {Map<string, number>} balances
+     * @returns {{ordered: EventView[], proven: string[],
+     *     ambiguous: {eventId: string, contracts: string[]} | null}}
      */
     function orderGroup(group, balances) {
         const byKey = group.slice().sort((a, b) => compareKeys(a.key, b.key));
@@ -219,7 +547,7 @@
             }
         }
         const unsettled = [...touched.keys()].filter((key) => !orderIndependent(
-            balances.get(key) || 0, touched.get(key).map((item) => item.delta)));
+            balances.get(key) || 0, touched.get(key).map((/** @type {{delta: number}} */ item) => item.delta)));
         if (!unsettled.length) return { ordered: byKey, proven: [], ambiguous: null };
         const needing = new Map();
         for (const key of unsettled) {
@@ -228,10 +556,10 @@
         const evidence = [...needing.values()].map((event) => event.evidence);
         const scopes = new Set(evidence.filter(Boolean).map((found) => found.scope));
         const sequences = evidence.filter(Boolean).map((found) => found.sequence);
-        const refuse = (eventId) => ({ ordered: byKey, proven: [], ambiguous: { eventId, contracts: unsettled } });
+        const refuse = (/** @type {string} */ eventId) => ({ ordered: byKey, proven: [], ambiguous: { eventId, contracts: unsettled } });
         if (evidence.some((found) => !found) || scopes.size !== 1
             || new Set(sequences).size !== sequences.length) {
-            return refuse(byKey.find((event) => needing.has(event.id)).id);
+            return refuse(/** @type {EventView} */ (byKey.find((event) => needing.has(event.id))).id);
         }
         const first = [...needing.values()].sort((a, b) => a.evidence.sequence - b.evidence.sequence);
         let latestStart = null;
@@ -243,6 +571,12 @@
             proven: first.map((event) => event.id), ambiguous: null };
     }
 
+    /**
+     * @param {EventView} event
+     * @param {number} position
+     * @param {number} delta
+     * @param {'FUT' | 'FOP'} secType
+     */
     function closes(event, position, delta, secType) {
         // plan §5.1 and §6.1: which rows must reduce, and by no more than is open.
         if (secType === 'FUT' && DELIVERY_KINDS.has(event.kind)) return null;
@@ -265,6 +599,8 @@
      * evidence fixes, or a close that overdraws, taints the contracts it touches
      * (their averages and realized results become unknown); the server refuses
      * both, so only a preview of unsaved rows meets them.
+     * @param {EventView[]} events
+     * @returns {Timeline}
      */
     function buildTimeline(events) {
         const balances = new Map();
@@ -280,6 +616,7 @@
             if (group.length > 1) {
                 const result = orderGroup(group, balances);
                 group = result.ordered;
+                /** @type {[string, string][]} */
                 const ambiguous = [];
                 if (result.ambiguous) {
                     const reason = `order_ambiguous:${result.ambiguous.eventId}`;
@@ -314,6 +651,10 @@
      * ended, and those the order evidence puts before one of them (the broker
      * sequence proves they came first). An event that has started but is
      * proven by nothing is unresolved; one that starts later has not happened.
+     * @param {EventView[]} events
+     * @param {Timeline} full
+     * @param {string} asOf
+     * @returns {Map<string, 'future' | 'unresolved' | 'happened'>}
      */
     function asOfStatus(events, full, asOf) {
         const status = new Map();
@@ -341,13 +682,17 @@
      * event keeps its cycle in an as-of view too. There a boundary is passed
      * only once every event of its group has happened; later ones are not.
      * An event's cycle is at most the current one.
+     * @param {ReadGraph} read
+     * @param {Timeline} full
+     * @param {(id: string) => boolean} happened
+     * @returns {Placement}
      */
     function placeCycles(read, full, happened) {
         const anchors = new Map(read.cycles.map((cycle) => [cycle.anchorEventId, cycle]));
         const closing = new Map();
         for (const event of full.ordered) {
             if (!anchors.has(event.id)) continue;
-            const group = full.groupOf.get(event.id);
+            const group = /** @type {string[]} */ (full.groupOf.get(event.id));
             if (!closing.has(group[group.length - 1])) closing.set(group[group.length - 1], anchors.get(event.id));
         }
         const cycleOf = new Map();
@@ -359,14 +704,14 @@
             cycleOf.set(event.id, index);
             const boundary = closing.get(event.id);
             if (!boundary) continue;
-            const group = full.groupOf.get(event.id);
+            const group = /** @type {string[]} */ (full.groupOf.get(event.id));
             boundaries.push({ boundary, passed: group.every((id) => happened(id)) });
             if (group.length > 1) for (const id of group) straddling.set(id, index);
             index += 1;
         }
         let current = boundaries.findIndex((item) => !item.passed);
         if (current === -1) current = boundaries.length;
-        const cycleIndex = (id) => Math.min(cycleOf.get(id), current);
+        const cycleIndex = (/** @type {string} */ id) => Math.min(cycleOf.get(id), current);
         return { cycleOf, cycleIndex, straddling, current,
             boundaries: boundaries.slice(0, current).map((item) => item.boundary) };
     }
@@ -375,32 +720,48 @@
     // Pass 2: economics (plan §5.1-§5.3, §6.1, §9.2 baseline, §13.2)
     // ------------------------------------------------------------------
 
+    /**
+     * @returns {Buckets}
+     */
     function createBuckets() {
         return { Rf: createSum(), Co: createSum(), E: createSum(), J: createSum(),
             Rs: createSum(), Es: createSum(), Js: createSum(), Rb: createSum(), Eb: createSum(), longExercise: false };
     }
 
+    /**
+     * @param {FutContractRecord} record
+     * @returns {FutureState}
+     */
     function futureState(record) {
         return { record, q: 0, average: null, realized: 0, closedAny: false, taint: null, quantityReason: null };
     }
 
+    /**
+     * @param {FopContractRecord} record
+     * @returns {OptionState}
+     */
     function optionState(record) {
         return { record, n: 0, premium: 0, premiumReason: null, taint: null, quantityReason: null };
     }
 
-    /** One FUT fill or delivery leg at a price; returns the gross realized result. */
+    /**
+     * One FUT fill or delivery leg at a price; returns the gross realized result.
+     * @param {FutureState} state
+     * @param {number} delta
+     * @param {number} price
+     */
     function applyFuture(state, delta, price) {
         const pointValue = state.record.futurePointValue;
         if (Math.abs(state.q) < EPSILON || (state.q > 0) === (delta > 0)) {
             const quantity = state.q + delta;
             state.average = Math.abs(state.q) < EPSILON
-                ? price : (state.q * state.average + delta * price) / quantity;
+                ? price : (state.q * /** @type {number} */ (state.average) + delta * price) / quantity;
             state.q = quantity;
             return 0;
         }
         const closed = Math.min(Math.abs(delta), Math.abs(state.q));
         const direction = state.q > 0 ? 1 : -1;
-        const realized = closed * pointValue * direction * (price - state.average);
+        const realized = closed * pointValue * direction * (price - /** @type {number} */ (state.average));
         state.realized += realized;
         state.closedAny = true;
         const rest = Math.abs(delta) - closed;
@@ -419,6 +780,9 @@
      * One option trade: returns {settled, shortSide} for the part that closes.
      * The open part's cash joins the remaining net premium; a close releases
      * its share of it, and the last close releases exactly what is left.
+     * @param {OptionState} state
+     * @param {number} delta
+     * @param {number} cash
      */
     function applyOptionTrade(state, delta, cash) {
         if (state.n === 0 || (state.n > 0) === (delta > 0)) {
@@ -441,7 +805,11 @@
         return { settled: released.amount + closeCash, reason: released.reason, shortSide };
     }
 
-    /** An expiry or a delivery closing `closed` contracts with no premium cash. */
+    /**
+     * An expiry or a delivery closing `closed` contracts with no premium cash.
+     * @param {OptionState} state
+     * @param {number} closedContracts
+     */
     function applyOptionClose(state, closedContracts) {
         const closed = Math.abs(closedContracts);
         const shortSide = state.n < 0;
@@ -454,6 +822,8 @@
      * The share of the remaining net premium `closed` contracts take with
      * them; the last close takes exactly what is left, so settled plus open
      * premium always adds back to the cash paid and received (plan §14.2).
+     * @param {OptionState} state
+     * @param {number} closed
      */
     function releasePremium(state, closed) {
         const open = Math.abs(state.n);
@@ -472,6 +842,9 @@
      * adjustment no single cycle owns, {affected: [cycle indices]}. A fee
      * with a source goes to its source's cycle; one without, that shares its
      * time with a boundary's group, could belong to either side of it.
+     * @param {EventView} event
+     * @param {Placement} placement
+     * @returns {Target}
      */
     function targetOf(event, placement) {
         if (event.kind === 'fee' && event.feeSourceEventId) {
@@ -481,16 +854,26 @@
             return { affected: Array.from({ length: placement.current + 1 }, (_value, index) => index) };
         }
         if ((event.kind === 'fee' || event.kind === 'manual_adjust') && placement.straddling.has(event.id)) {
-            const before = placement.straddling.get(event.id);
+            const before = /** @type {number} */ (placement.straddling.get(event.id));
             return { affected: [before, before + 1].filter((index) => index <= placement.current) };
         }
         return { cycle: placement.cycleIndex(event.id) };
     }
 
-    /** Pass 2 over the ordered events; per-cycle and whole-book buckets. */
+    /**
+     * Pass 2 over the ordered events; per-cycle and whole-book buckets.
+     * @param {ReadGraph} read
+     * @param {Timeline} timeline
+     * @param {Placement} placement
+     * @param {ComputeOptions} options
+     * @returns {Economics}
+     */
     function replayEconomics(read, timeline, placement, options) {
+        /** @type {Map<string, FutureState>} */
         const futures = new Map();
+        /** @type {Map<string, OptionState>} */
         const optionsState = new Map();
+        /** @type {CycleEconomics[]} */
         const cycles = [];
         for (let index = 0; index <= placement.current; index += 1) {
             cycles.push({
@@ -505,29 +888,47 @@
             });
         }
         const book = createBuckets();
+        /** @type {{E: Metric, J: Metric} & Partial<Record<BucketName, Metric>>} */
         const unattributed = { E: createSum(), J: createSum() };
         const openingValue = createSum();
+        /** @type {string[]} */
         const baselineReasons = [];
+        /** @type {object[]} */
         const steps = [];
 
+        /** @param {FutContractRecord} record */
         function futureOf(record) {
             if (!futures.has(record.contractId)) futures.set(record.contractId, futureState(record));
-            return futures.get(record.contractId);
+            return /** @type {FutureState} */ (futures.get(record.contractId));
         }
+        /** @param {FopContractRecord} record */
         function optionOf(record) {
             if (!optionsState.has(record.contractId)) {
                 optionsState.set(record.contractId, optionState(record));
             }
-            return optionsState.get(record.contractId);
+            return /** @type {OptionState} */ (optionsState.get(record.contractId));
         }
+        /** @param {string} key */
         function taintOf(key) {
             return timeline.taints.get(key) || null;
         }
+        /**
+         * @param {BucketName} name
+         * @param {number | null} amount
+         * @param {number | undefined} cycle undefined only for a fee or an adjustment, which go through addCash
+         * @param {string | null} reason
+         */
         function add(name, amount, cycle, reason) {
             addTo(book[name], amount, reason);
-            addTo(cycles[cycle].buckets[name], amount, reason);
+            addTo(cycles[/** @type {number} */ (cycle)].buckets[name], amount, reason);
         }
-        /** A fee's or an adjustment's cash into its buckets (E, J; Es, Js). */
+        /**
+         * A fee's or an adjustment's cash into its buckets (E, J; Es, Js).
+         * @param {BucketName[]} names
+         * @param {number} amount
+         * @param {Target} target
+         * @param {string} eventId
+         */
         function addCash(names, amount, target, eventId) {
             if (target.cycle !== undefined) {
                 for (const name of names) add(name, amount, target.cycle, null);
@@ -551,10 +952,12 @@
         for (const event of timeline.ordered) {
             const target = targetOf(event, placement);
             const cycle = target.cycle;
-            const record = event.contract;
+            // Every kind read below names its contract (protocol FopEvent);
+            // a fee or an adjustment, which has none, never reads it.
+            const record = /** @type {ContractRecord} */ (event.contract);
             switch (event.kind) {
             case 'futures_trade': {
-                const state = futureOf(record);
+                const state = futureOf(/** @type {FutContractRecord} */ (record));
                 const realized = applyFuture(state, event.futureContracts, event.price);
                 add('Rf', realized, cycle, taintOf(`FUT:${record.contractId}`));
                 add('E', event.fees, cycle, null);
@@ -562,7 +965,7 @@
                 break;
             }
             case 'option_trade': {
-                const state = optionOf(record);
+                const state = optionOf(/** @type {FopContractRecord} */ (record));
                 add('Co', event.cash, cycle, null);
                 const result = applyOptionTrade(state, event.contracts, event.cash);
                 if (result) {
@@ -574,38 +977,46 @@
             case 'option_expiry':
             case 'option_assignment':
             case 'option_exercise': {
-                const state = optionOf(record);
+                const state = optionOf(/** @type {FopContractRecord} */ (record));
                 const result = applyOptionClose(state, event.contracts);
                 add(result.shortSide ? 'Rs' : 'Rb', result.settled, cycle,
                     taintOf(`FOP:${record.contractId}`) || result.reason);
                 add('E', event.fees, cycle, null);
                 add(result.shortSide ? 'Es' : 'Eb', event.fees, cycle, null);
                 if (DELIVERY_KINDS.has(event.kind) && event.delivered) {
+                    // A delivery carries its future quantity and price.
                     const future = futureOf(event.delivered);
-                    const realized = applyFuture(future, event.futureContracts, event.price);
+                    const realized = applyFuture(future, /** @type {number} */ (event.futureContracts),
+                        /** @type {number} */ (event.price));
                     add('Rf', realized, cycle, taintOf(`FUT:${event.delivered.contractId}`));
                 }
                 if (event.kind === 'option_exercise') {
                     book.longExercise = true;
-                    cycles[cycle].buckets.longExercise = true;
+                    cycles[/** @type {number} */ (cycle)].buckets.longExercise = true;
                 }
                 break;
             }
             case 'opening_balance': {
+                // A FUT baseline holds futureContracts and a price, a FOP one
+                // contracts, and a price unless its cost is unknown (protocol
+                // rules baseline_holds_one_quantity, known_baseline_has_a_price).
                 if (record.secType === 'FUT') {
-                    applyFuture(futureOf(record), event.futureContracts, event.price);
+                    applyFuture(futureOf(record), /** @type {number} */ (event.futureContracts),
+                        /** @type {number} */ (event.price));
                     if (event.baselineKind !== 'reference_price') {
                         baselineReasons.push(`baseline_not_at_reference:${record.contractId}`);
                     }
                 } else {
                     const state = optionOf(record);
-                    state.n += event.contracts;
+                    state.n += /** @type {number} */ (event.contracts);
                     if (event.baselineKind === 'trade_cost') {
-                        state.premium += -event.contracts * record.premiumMultiplier * event.price;
+                        state.premium += -/** @type {number} */ (event.contracts) * record.premiumMultiplier
+                            * /** @type {number} */ (event.price);
                         addTo(openingValue, 0, `baseline_not_at_reference:${record.contractId}`);
                     } else if (event.baselineKind === 'reference_price') {
                         state.premiumReason = `opening_premium_unknown:${record.contractId}`;
-                        addTo(openingValue, event.contracts * record.premiumMultiplier * event.price, null);
+                        addTo(openingValue, /** @type {number} */ (event.contracts) * record.premiumMultiplier
+                            * /** @type {number} */ (event.price), null);
                     } else {
                         state.premiumReason = `unknown_opening_cost:${record.contractId}`;
                         addTo(openingValue, 0, `unknown_opening_cost:${record.contractId}`);
@@ -615,6 +1026,7 @@
             }
             case 'fee': {
                 if (!event.includeInCost) break;
+                /** @type {BucketName[]} */
                 let names = ['E'];
                 if (SELLER_FEE_CATEGORIES.has(event.feeCategory)) names = ['E', 'Es'];
                 else if (event.feeCategory === BUYER_FEE_CATEGORY) names = ['E', 'Eb'];
@@ -636,7 +1048,14 @@
             baselineReasons, steps };
     }
 
+    /**
+     * @param {EventView} event
+     * @param {Map<string, FutureState>} futures
+     * @param {Map<string, OptionState>} optionsState
+     * @param {Buckets} book
+     */
     function stepOf(event, futures, optionsState, book) {
+        /** @type {Record<string, object>} */
         const positions = {};
         for (const [id, state] of futures) {
             if (Math.abs(state.q) > EPSILON) positions[id] = { contracts: state.q, averagePrice: state.average };
@@ -647,7 +1066,7 @@
                     remainingNetPremium: state.premiumReason === null ? state.premium : null };
             }
         }
-        const value = (sum) => (sum.reason === null ? sum.value : null);
+        const value = (/** @type {Metric} */ sum) => (sum.reason === null ? sum.value : null);
         return { after: event.id, positions, Rf: value(book.Rf), Co: value(book.Co), E: value(book.E),
             J: value(book.J), Rs: value(book.Rs), Es: value(book.Es), Js: value(book.Js) };
     }
@@ -667,9 +1086,12 @@
      * delivery month than the closing one (a roll goes forward, and either leg
      * may come first). Candidates never consume quantity from evidence groups,
      * and nothing here changes a P&L figure.
+     * @param {Timeline} timeline
+     * @param {{fromUtc?: string | null, toUtc?: string | null} | null} range
      */
     function deriveRolls(timeline, range) {
         const balances = new Map();
+        /** @type {Segment[]} */
         const segments = [];
         for (const event of timeline.ordered) {
             for (const delta of event.deltas) {
@@ -693,6 +1115,10 @@
             }
         }
         const feesUsed = new Map();
+        /**
+         * @param {Segment} segment
+         * @param {number} used
+         */
         function leg(segment, used) {
             const event = segment.event;
             const total = Math.abs(event.futureContracts);
@@ -714,12 +1140,13 @@
             }
         }
         const clusterOf = unionClusters(clusters);
+        /** @type {Map<string, Segment[]>} */
         const byCluster = new Map();
         for (const segment of segments) {
             const cluster = clusterOf.get(segment.event.id);
             if (!cluster) continue;
             if (!byCluster.has(cluster)) byCluster.set(cluster, []);
-            byCluster.get(cluster).push(segment);
+            /** @type {Segment[]} */ (byCluster.get(cluster)).push(segment);
         }
         for (const clusterSegments of byCluster.values()) {
             const closesIn = new Set(clusterSegments.filter((s) => s.side === 'close')
@@ -747,8 +1174,9 @@
             if (matched > 0) groups.push({ evidence: 'order', legs: mergeLegs(legs), matchedContracts: matched });
         }
         // Candidates within the query range.
-        const inRange = (segment) => (!range || ((!range.fromUtc || segment.event.interval[0] >= range.fromUtc)
+        const inRange = (/** @type {Segment} */ segment) => (!range || ((!range.fromUtc || segment.event.interval[0] >= range.fromUtc)
             && (!range.toUtc || segment.event.interval[1] <= range.toUtc)));
+        /** @type {Segment[]} */
         const waiting = [];
         for (const segment of segments) {
             if (segment.left <= 0 || !inRange(segment)) continue;
@@ -770,9 +1198,13 @@
         return groups;
     }
 
+    /**
+     * @param {Map<string, Set<string>>} clusters
+     * @returns {Map<string, string>}
+     */
     function unionClusters(clusters) {
         const parent = new Map();
-        const find = (id) => {
+        const find = (/** @type {string} */ id) => {
             while (parent.get(id) !== id) id = parent.get(id);
             return id;
         };
@@ -789,6 +1221,9 @@
         return result;
     }
 
+    /**
+     * @param {{eventId: string, contractId: string, contracts: number, price: number, fees: number}[]} legs
+     */
     function mergeLegs(legs) {
         const merged = new Map();
         for (const leg of legs) {
@@ -807,6 +1242,11 @@
     // The ledger output
     // ------------------------------------------------------------------
 
+    /**
+     * @param {Record<string, number | null> | null | undefined} marks
+     * @param {ContractRecord} record
+     * @returns {Metric}
+     */
     function markOf(marks, record) {
         if (!marks || !Object.prototype.hasOwnProperty.call(marks, record.contractId)
             || marks[record.contractId] === null || marks[record.contractId] === undefined) {
@@ -818,11 +1258,19 @@
         return known(price);
     }
 
+    /**
+     * @param {FutureState} a
+     * @param {FutureState} b
+     */
     function byMonth(a, b) {
         return compareKeys([a.record.futureContractMonth, a.record.contractId],
             [b.record.futureContractMonth, b.record.contractId]);
     }
 
+    /**
+     * @param {OptionState} a
+     * @param {OptionState} b
+     */
     function byOption(a, b) {
         return compareKeys([a.record.optionExpiry, a.record.optionRight, a.record.optionStrike, a.record.contractId],
             [b.record.optionExpiry, b.record.optionRight, b.record.optionStrike, b.record.contractId]);
@@ -837,14 +1285,22 @@
      * it puts earlier has happened); where it does not, it changes nothing
      * already realized. `realized` gets the FUT contracts whose realized
      * result it could still change.
+     * @param {EventView} event
+     * @param {Economics} economics
+     * @param {Map<string, number>} pending
+     * @param {Set<string>} realized
+     * @returns {BucketName[]}
      */
     function bucketsAtRisk(event, economics, pending, realized) {
+        /** @type {BucketName[]} */
         const names = [];
-        const reducing = (position, delta) => Math.abs(position) > EPSILON && (position > 0) !== (delta > 0);
+        const reducing = (/** @type {number} */ position, /** @type {number} */ delta) => Math.abs(position) > EPSILON && (position > 0) !== (delta > 0);
         for (const delta of event.deltas) {
             if (delta.secType === 'FUT') {
                 const state = economics.futures.get(delta.id);
-                if ((state && reducing(state.q, delta.delta)) || pending.get(delta.key) > 1) {
+                // pending has no entry for a contract no unresolved event
+                // touches; undefined > 1 is false, as for a count of one.
+                if ((state && reducing(state.q, delta.delta)) || /** @type {number} */ (pending.get(delta.key)) > 1) {
                     names.push('Rf');
                     realized.add(delta.key);
                 }
@@ -852,8 +1308,8 @@
                 const state = economics.options.get(delta.id);
                 const short = state && state.n < 0 && reducing(state.n, delta.delta);
                 const long = state && state.n > 0 && reducing(state.n, delta.delta);
-                if (short || pending.get(delta.key) > 1) names.push('Rs');
-                if (long || pending.get(delta.key) > 1) names.push('Rb');
+                if (short || /** @type {number} */ (pending.get(delta.key)) > 1) names.push('Rs');
+                if (long || /** @type {number} */ (pending.get(delta.key)) > 1) names.push('Rb');
                 if (short && event.kind !== 'option_trade' && event.fees) names.push('Es');
                 if (long && event.kind !== 'option_trade' && event.fees) names.push('Eb');
             }
@@ -881,6 +1337,8 @@
      * options.rollRange: {fromUtc, toUtc} limiting ROLL candidates (display only);
      * options.rolls: false leaves ROLL groups out (they never change a figure);
      * options.trace: return {output, steps, order, groups, problems} instead.
+     * @param {LedgerGraph} graph
+     * @param {ComputeOptions} [options]
      */
     function computeLedger(graph, options = {}) {
         const read = readGraph(graph);
@@ -890,6 +1348,7 @@
         const full = buildTimeline(read.events);
         let timeline = full;
         const unresolved = [];
+        /** @type {(id: string) => boolean} */
         let happened = () => true;
         if (asOf) {
             const status = asOfStatus(read.events, full, asOf);
@@ -914,8 +1373,10 @@
         const realizedReason = new Map();
         // Buckets an unresolved event could still change: of the whole book,
         // of the cycle it belongs to, and of the unattributed row.
+        /** @type {BucketRisk} */
         const bookRisk = {};
-        const cycleRisk = economics.cycles.map(() => ({}));
+        const cycleRisk = economics.cycles.map(() => /** @type {BucketRisk} */ ({}));
+        /** @type {BucketRisk} */
         const unattributedRisk = {};
         const pending = new Map();
         // How far unresolved events could still raise each position: only these can make a contract long.
@@ -946,17 +1407,20 @@
             for (const key of realized) if (!realizedReason.has(key)) realizedReason.set(key, reason);
             for (const delta of event.deltas) {
                 if (!quantityReason.has(delta.key)) quantityReason.set(delta.key, reason);
+                // A FUT delta's record is the delivered future or the FUT the
+                // event trades; a FOP delta's is the event's option.
                 const record = delta.secType === 'FUT' && event.delivered
                     && event.delivered.contractId === delta.id ? event.delivered : event.contract;
                 if (delta.secType === 'FUT' && !economics.futures.has(delta.id)) {
-                    economics.futures.set(delta.id, futureState(record));
+                    economics.futures.set(delta.id, futureState(/** @type {FutContractRecord} */ (record)));
                 }
                 if (delta.secType === 'FOP' && !economics.options.has(delta.id)) {
-                    economics.options.set(delta.id, optionState(record));
+                    economics.options.set(delta.id, optionState(/** @type {FopContractRecord} */ (record)));
                 }
             }
         }
-        const contractReason = (key) => quantityReason.get(key) || timeline.taints.get(key) || null;
+        const contractReason = (/** @type {string} */ key) => quantityReason.get(key) || timeline.taints.get(key) || null;
+        /** @type {(sum: Metric, reason: string | null | undefined) => Metric} */
         const withRisk = (sum, reason) => (reason && sum.reason === null ? unknown(reason) : { ...sum });
 
         const futureRows = [];
@@ -972,15 +1436,15 @@
             let unrealized;
             if (reason) unrealized = unknown(reason);
             else if (mark.reason) unrealized = unknown('missing_mark');
-            else unrealized = known(state.q * pointValue * (mark.value - state.average));
+            else unrealized = known(state.q * pointValue * (/** @type {number} */ (mark.value) - /** @type {number} */ (state.average)));
             futureRows.push({
                 contractId: state.record.contractId,
                 localSymbol: state.record.localSymbol,
                 contractMonth: state.record.futureContractMonth,
                 contracts: qReason ? unknown(qReason) : known(state.q),
                 pointValue,
-                averagePrice: reason ? unknown(reason) : known(state.average),
-                basis: reason ? unknown(reason) : known(state.q * pointValue * state.average),
+                averagePrice: reason ? unknown(reason) : known(/** @type {number} */ (state.average)),
+                basis: reason ? unknown(reason) : known(state.q * pointValue * /** @type {number} */ (state.average)),
                 mark,
                 unrealized,
             });
@@ -1011,7 +1475,7 @@
             let value;
             if (qReason) value = unknown(qReason);
             else if (mark.reason) value = unknown('missing_mark');
-            else value = known(state.n * state.record.premiumMultiplier * mark.value);
+            else value = known(state.n * state.record.premiumMultiplier * /** @type {number} */ (mark.value));
             optionRows.push({
                 contractId: state.record.contractId,
                 right: state.record.optionRight,
@@ -1071,10 +1535,12 @@
         // B cannot be told (plan §9.2).
         const baselineReason = economics.baselineReasons[0] || null;
 
+        /** @type {Record<'Rf' | 'Uf' | 'Co' | 'Vo' | 'E' | 'J', Metric> & {economicPnl?: Metric}} */
         const totals = {
             Rf: withRisk(book.Rf, bookRisk.Rf), Uf: { ...Uf }, Co: withRisk(book.Co, bookRisk.Co), Vo: { ...Vo },
             E: withRisk(book.E, bookRisk.E), J: withRisk(book.J, bookRisk.J),
         };
+        /** @type {Array<[number, Metric]>} */
         const pnlParts = [[1, totals.Rf], [1, totals.Uf], [1, totals.Co], [1, totals.Vo], [-1, totals.E],
             [1, totals.J]];
         if (history === 'since_baseline') pnlParts.push([-1, openingValue]);
@@ -1089,11 +1555,13 @@
             const b = cycle.buckets;
             const risk = cycleRisk[cycle.index];
             const open = cycle.index === currentIndex;
+            /** @type {Record<'Rf' | 'Uf' | 'Co' | 'Vo' | 'E' | 'J', Metric> & {economicPnl?: Metric}} */
             const cycleTotals = {
                 Rf: withRisk(b.Rf, risk.Rf), Uf: open ? totals.Uf : known(0),
                 Co: withRisk(b.Co, risk.Co), Vo: open ? totals.Vo : known(0),
                 E: withRisk(b.E, risk.E), J: withRisk(b.J, risk.J),
             };
+            /** @type {Array<[number, Metric]>} */
             const parts = [[1, cycleTotals.Rf], [1, cycleTotals.Uf], [1, cycleTotals.Co], [1, cycleTotals.Vo],
                 [-1, cycleTotals.E], [1, cycleTotals.J]];
             if (history === 'since_baseline' && cycle.index === 0) parts.push([-1, openingValue]);
@@ -1128,10 +1596,14 @@
         } else {
             const state = openFutures[0];
             const exposure = state.q * state.record.futurePointValue;
-            const settled = cycles[currentIndex].totals.Rf.value + lens.Rs.value - lens.Es.value + lens.Js.value;
-            breakEven = known(state.average - settled / exposure);
+            // No lens reason: each of these is known, and the one open FUT
+            // has its average.
+            const settled = /** @type {number} */ (cycles[currentIndex].totals.Rf.value)
+                + /** @type {number} */ (lens.Rs.value) - /** @type {number} */ (lens.Es.value)
+                + /** @type {number} */ (lens.Js.value);
+            breakEven = known(/** @type {number} */ (state.average) - settled / exposure);
             ifExpire = openShortPremium.reason ? unknown(openShortPremium.reason)
-                : known(breakEven.value - openShortPremium.value / exposure);
+                : known(breakEven.value - /** @type {number} */ (openShortPremium.value) / exposure);
         }
 
         const output = {
@@ -1150,7 +1622,7 @@
             unattributed: { E: withRisk(economics.unattributed.E, unattributedRisk.E),
                 J: withRisk(economics.unattributed.J, unattributedRisk.J) },
             roll: { groups: options.rolls === false ? [] : deriveRolls(timeline, options.rollRange || null) },
-            gaps: [],
+            gaps: /** @type {{metric: string, reason: string}[]} */ ([]),
         };
         output.gaps = gapsOf(output);
         if (options.trace) {
@@ -1168,8 +1640,14 @@
      * the fees only longs carry (their exercise and expiry fees, long_option
      * fees; never in Es), the open longs' remaining net premium (paid:
      * negative) and value, and the result they make together.
+     * @param {Buckets} book
+     * @param {Partial<Record<BucketName, string>>} risk
+     * @param {Metric} openPremium
+     * @param {Metric} openValue
+     * @param {(sum: Metric, reason: string | null | undefined) => Metric} withRisk
      */
     function buyerOptionsOf(book, risk, openPremium, openValue, withRisk) {
+        /** @type {Record<'Rb' | 'Eb' | 'openPremium' | 'openValue', Metric> & {result?: Metric}} */
         const parts = {
             Rb: withRisk(book.Rb, risk.Rb), Eb: withRisk(book.Eb, risk.Eb),
             openPremium: { ...openPremium }, openValue: { ...openValue },
@@ -1178,11 +1656,14 @@
         return parts;
     }
 
+    /**
+     * @param {Timeline} timeline
+     */
     function groupsOf(timeline) {
         const seen = new Set();
         const groups = [];
         for (const event of timeline.ordered) {
-            const group = timeline.groupOf.get(event.id);
+            const group = /** @type {string[]} */ (timeline.groupOf.get(event.id));
             const key = group.join('|');
             if (group.length > 1 && !seen.has(key)) {
                 seen.add(key);
@@ -1198,10 +1679,12 @@
      * remaining premiums of the listed contracts, realized results, totals and
      * the seller lens. The quote figures of a row (mark, unrealized, value)
      * are not repeated: the row carries its reason and the totals the effect.
+     * @param {GapSource} output
      */
     function gapsOf(output) {
+        /** @type {{metric: string, reason: string}[]} */
         const gaps = [];
-        const note = (metric, value) => {
+        const note = (/** @type {string} */ metric, /** @type {Metric | undefined} */ value) => {
             if (value && value.reason) gaps.push({ metric, reason: value.reason });
         };
         if (output.scope.history === 'since_baseline') note('scope.openingValue', output.scope.openingValue);
@@ -1215,7 +1698,8 @@
             note(`totals.${name}`, output.totals[name]);
         }
         for (const name of ['Rs', 'Es', 'Js', 'breakEven', 'breakEvenIfOpenShortsExpire']) {
-            note(`sellerLens.${name}`, output.sellerLens[name]);
+            // Each name here is a Metric (the lens also holds a boolean flag).
+            note(`sellerLens.${name}`, /** @type {Metric} */ (output.sellerLens[name]));
         }
         for (const name of ['Rb', 'Eb', 'openPremium', 'openValue', 'result']) {
             note(`buyerOptions.${name}`, output.buyerOptions[name]);

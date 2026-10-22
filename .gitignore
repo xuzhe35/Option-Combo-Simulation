@@ -4,6 +4,8 @@ sqlite_spy/
 __pycache__/
 .venv/
 venv/
+# TypeScript for the type check only (npm install); never loaded by a page.
+node_modules/
 *.py[cod]
 server_log.txt
 logs/

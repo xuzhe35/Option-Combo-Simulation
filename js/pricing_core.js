@@ -1,8 +1,177 @@
+// @ts-check
 /**
  * Pure pricing helpers shared by the browser app and tests.
  */
 
 (function attachPricingCore(globalScope) {
+    /**
+     * A leg as the workspace state holds it.
+     * @typedef {object} PricingLeg
+     * @property {string} type 'call', 'put', 'stock' or 'underlying'
+     * @property {number} pos
+     * @property {number} cost
+     * @property {number} strike
+     * @property {string} expDate
+     * @property {string} [id]
+     * @property {number | null} [iv]
+     * @property {string | null} [ivSource]
+     * @property {number | null} [currentPrice]
+     * @property {string | null} [currentPriceSource]
+     * @property {number | string | null} [closePrice] '' or null when the price is not fixed
+     * @property {unknown} [historicalExpiryUnderlyingPrice]
+     */
+
+    /**
+     * Per-leg timestamp evidence from the caller; every field is optional.
+     * @typedef {object} TimingContext
+     * @property {string | null} [targetAsOf]
+     * @property {string | null} [targetSource]
+     * @property {string | null} [quoteAsOf]
+     * @property {string | null} [observablePriceSource]
+     * @property {string | null} [observablePriceAsOf]
+     * @property {boolean} [observablePriceFresh]
+     * @property {unknown} [observablePrice]
+     * @property {boolean} [allowLegacyQuoteCutoff]
+     * @property {boolean} [allowProjectionIvFallback]
+     * @property {boolean} [quotePricingInputsAvailable]
+     * @property {string | null} [quotePricingInputStatus]
+     * @property {unknown} [quoteUnderlyingPrice]
+     * @property {unknown} [quoteInterestRate]
+     * @property {string | null} [quoteUnderlyingAsOf]
+     */
+
+    /**
+     * What _resolveExactLegTiming() found. Fields past `bboTimestampFresh`
+     * exist only on the branches that reach them.
+     * @typedef {object} ExactLegTiming
+     * @property {boolean} requested
+     * @property {boolean} active
+     * @property {boolean} available
+     * @property {string} status
+     * @property {number | null} quoteMs
+     * @property {number | null} targetMs
+     * @property {string | null} quoteAsOf
+     * @property {string | null} quoteSource
+     * @property {string | null} targetAsOf
+     * @property {string | null} targetSource
+     * @property {OptionComboExpiryCutoff | null} expiry
+     * @property {number | null} observablePrice
+     * @property {boolean} bboTimestampFresh
+     * @property {string} [observablePriceSource]
+     * @property {string | null} [observablePriceAsOf]
+     * @property {boolean} [isExpired]
+     * @property {OptionComboWeightedTime} [remainingClock]
+     * @property {OptionComboWeightedTime} [anchorClock]
+     * @property {boolean} [calendarEstimated]
+     * @property {boolean} [isObservableQuoteInstant]
+     */
+
+    /**
+     * solveImpliedVolatility(): an IV, or why there is none.
+     * @typedef {object} ImpliedVolatilityResult
+     * @property {boolean} available
+     * @property {string} status
+     * @property {number | null} impliedVolatility
+     * @property {number | null} totalVariance
+     * @property {number} [modelPrice]
+     * @property {number} [lower] no-arbitrage bounds, once checked
+     * @property {number} [upper]
+     */
+
+    /**
+     * The IV a leg's own fresh BBO implies, or why it does not.
+     * @typedef {object} LocalIvAnchor
+     * @property {boolean} attempted
+     * @property {boolean} available
+     * @property {string} status
+     * @property {string} source
+     * @property {number | null} impliedVolatility
+     * @property {number | null} totalVariance
+     * @property {number} [modelPrice]
+     * @property {number} [anchorT]
+     * @property {number} [anchorRateT]
+     * @property {number} [optionPrice]
+     * @property {number} [quoteUnderlyingPrice]
+     * @property {number} [quoteInterestRate]
+     * @property {string | null} [quoteAsOf]
+     */
+
+    /**
+     * processLegData(): a leg resolved for pricing. An underlying leg carries
+     * the fields up to `effectiveCostPerShare` plus `effectiveCostPerUnit`;
+     * the optional rest belongs to option legs.
+     * @typedef {object} ProcessedLeg
+     * @property {string} type
+     * @property {number} strike
+     * @property {number} pos
+     * @property {boolean} isUnderlyingLeg
+     * @property {boolean} isExpired
+     * @property {number | null} calDTE
+     * @property {number | null} tradDTE
+     * @property {number | null} T variance time; null when the clock is unavailable
+     * @property {number | null} rateT
+     * @property {number | null} simIV null when no usable IV
+     * @property {string} pricingModel
+     * @property {number} dividendYield
+     * @property {'futures' | 'spot'} americanUnderlyingMode
+     * @property {number} binomialSteps
+     * @property {number} contractMultiplier
+     * @property {number} settlementUnitsPerContract
+     * @property {number} posMultiplier
+     * @property {number} costBasis
+     * @property {number} effectiveCostPerShare
+     * @property {number} [effectiveCostPerUnit]
+     * @property {string} [calendarKey]
+     * @property {boolean} [calendarAvailable]
+     * @property {boolean} [simIVAvailable]
+     * @property {string} [simIVSource]
+     * @property {string | null} [simIVFallbackSource]
+     * @property {number | null} [expiryUnderlyingPrice]
+     * @property {number | null} [anchorUnderlyingPrice]
+     * @property {boolean} [exactTimingActive]
+     * @property {boolean} [timingAvailable]
+     * @property {string | null} [timingStatus]
+     * @property {boolean} [calendarEstimated]
+     * @property {string[]} [missingWeightDates]
+     * @property {string | null} [quoteAsOf]
+     * @property {string | null} [targetAsOf]
+     * @property {string | null} [targetSource]
+     * @property {boolean} [isObservableQuoteInstant]
+     * @property {number | null} [observablePrice]
+     * @property {boolean} [localIvAnchorAttempted]
+     * @property {boolean} [localIvAnchorAvailable]
+     * @property {string} [localIvAnchorStatus]
+     * @property {number | null} [localImpliedIv]
+     * @property {number | null} [localAnchorTotalVariance]
+     * @property {number | undefined} [localAnchorPrice]
+     * @property {number | undefined} [localAnchorUnderlyingPrice]
+     * @property {number | undefined} [localAnchorInterestRate]
+     * @property {boolean} [intradayActive]
+     * @property {string | null} [intradayTimeSource]
+     * @property {string | null} [expiryCutoffAsOf]
+     */
+
+    /**
+     * The workspace fields the convergence gate reads.
+     * @typedef {object} ProjectionState
+     * @property {string} [projectionConvergenceMode]
+     * @property {string} [marketDataMode]
+     * @property {boolean} [liveProjectionFeedConnected]
+     * @property {boolean} [liveProjectionFeedStale]
+     * @property {string | null} [liveProjectionLastReceivedAt]
+     * @property {{required?: boolean, ready?: boolean, status?: string, affectedLegIds?: string[],
+     *     requiredDates?: string[], missingDates?: string[]} | null} [simImpliedLambdaCoverage]
+     */
+
+    /**
+     * @typedef {object} ConvergenceFailure
+     * @property {string} [legId]
+     * @property {string} [expDate]
+     * @property {string} reason
+     * @property {string | null} detail
+     * @property {string[]} [missingDates]
+     */
+
     const dateUtils = globalScope.OptionComboDateUtils;
     const productRegistry = globalScope.OptionComboProductRegistry;
     const americanBinomial = globalScope.OptionComboAmericanBinomial;
@@ -21,7 +190,9 @@
     // historical behavior), 0 = pure trading-day clock, in between = weighted.
     // Configured from app state via configureSimTimeBasis(); defaults to the
     // legacy calendar clock so nothing changes until the user opts in.
+    /** @type {number | OptionComboWeekendWeightSpec} */
     let simTimeBasisWeekendWeight = 1;
+    /** @type {string[] | null} */
     let simObservedTradingDates = null;
     let equityOptionPricingModel = 'bsm-spot';
     let fopOptionPricingModel = 'black76';
@@ -31,6 +202,9 @@
         ? americanBinomial.DEFAULT_STEPS
         : 201;
 
+    /**
+     * @param {{model?: string, fopModel?: string, dividendYield?: unknown, steps?: unknown} | null} [options]
+     */
     function configureEquityOptionPricing(options) {
         const input = options && typeof options === 'object' ? options : {};
         equityOptionPricingModel = input.model === 'american-binomial'
@@ -59,6 +233,10 @@
         };
     }
 
+    /**
+     * @param {OptionComboWeekendWeight} value
+     * @returns {number | OptionComboWeekendWeightSpec}
+     */
     function normalizeWeekendWeight(value) {
         if (value !== null && typeof value === 'object') {
             // Per-date weights ({default, byDate}) are kept in spec form so
@@ -77,6 +255,9 @@
     // the effYear cancels between convertIvToWeightedClock and T, so only
     // the ratio of weighted day counts prices — the default keeps both on
     // the same clock.
+    /**
+     * @param {OptionComboWeekendWeight} weekendWeight
+     */
     function weekendWeightDefault(weekendWeight) {
         if (weekendWeight !== null && typeof weekendWeight === 'object') {
             const parsed = parseFloat(weekendWeight.default);
@@ -88,6 +269,9 @@
 
     // True when the configured weight differs from the pure calendar clock
     // for at least one day, i.e. the weighted-clock path must run.
+    /**
+     * @param {OptionComboWeekendWeight} weekendWeight
+     */
     function weekendWeightActive(weekendWeight) {
         if (weekendWeight !== null && typeof weekendWeight === 'object') {
             const spec = normalizeWeekendWeightSpec(weekendWeight);
@@ -98,6 +282,9 @@
         return weekendWeightDefault(weekendWeight) < 1;
     }
 
+    /**
+     * @param {{weekendWeight?: OptionComboWeekendWeight, observedTradingDates?: string[] | null} | null} [options]
+     */
     function configureSimTimeBasis(options) {
         simTimeBasisWeekendWeight = normalizeWeekendWeight(options && options.weekendWeight);
         simObservedTradingDates = options && Array.isArray(options.observedTradingDates)
@@ -113,6 +300,9 @@
     // Effective days per year on the weighted clock: 252 trading days plus
     // the non-trading remainder at its configured weight. At weight 1 this is
     // exactly 365, reproducing the calendar clock.
+    /**
+     * @param {OptionComboWeekendWeight} weekendWeight
+     */
     function weightedDaysPerYear(weekendWeight) {
         return 252 + (365 - 252) * weekendWeightDefault(weekendWeight);
     }
@@ -120,6 +310,12 @@
     // Convert a calendar-annualized IV (TWS convention) onto the weighted
     // clock, preserving the option's total variance as of the anchor date:
     // iv^2 * (anchorCalDte/365) === converted^2 * (anchorEffDte/effYear).
+    /**
+     * @param {number} iv
+     * @param {number} anchorCalDte
+     * @param {number} anchorEffDte
+     * @param {OptionComboWeekendWeight} weekendWeight
+     */
     function convertIvToWeightedClock(iv, anchorCalDte, anchorEffDte, weekendWeight) {
         if (!Number.isFinite(iv) || iv <= 0
             || !Number.isFinite(anchorCalDte) || anchorCalDte <= 0
@@ -136,6 +332,12 @@
     // assign different lambdas to different weekends and full holidays.
     // Missing official/observed calendar coverage is a hard unavailable state;
     // silently changing back to a calendar clock would mix two time bases.
+    /**
+     * @param {string} startDateStr
+     * @param {string} endDateStr
+     * @param {string} [calendarKey]
+     * @param {string} [marketDataMode]
+     */
     function resolveSimHorizonClock(
         startDateStr,
         endDateStr,
@@ -147,7 +349,7 @@
         const start = _parseIsoUtcDate(startKey);
         const end = _parseIsoUtcDate(endKey);
         const normalizedCalendarKey = String(calendarKey || 'NYSE').trim().toUpperCase() || 'NYSE';
-        const unavailable = (status) => ({
+        const unavailable = (/** @type {string} */ status) => ({
             available: false,
             status,
             calendarKey: normalizedCalendarKey,
@@ -243,7 +445,9 @@
                     weightSpec.byDate
                     && Object.prototype.hasOwnProperty.call(weightSpec.byDate, date)
                 );
-                weight = hasDateOverride ? weightSpec.byDate[date] : weightSpec.default;
+                weight = hasDateOverride
+                    ? /** @type {Record<string, number>} */ (weightSpec.byDate)[date]
+                    : weightSpec.default;
                 usedPerDateWeight = usedPerDateWeight || hasDateOverride;
                 kind = weekday === 0 || weekday === 6 ? 'weekend' : 'exchange_holiday';
             }
@@ -287,6 +491,10 @@
         };
     }
 
+    /**
+     * @param {number} calendarDte
+     * @param {number | null} effectiveDte
+     */
     function floorWeightedDteBeforeExpiry(calendarDte, effectiveDte) {
         if (Number.isFinite(effectiveDte) && calendarDte > 0 && effectiveDte <= 0) {
             // A zero or inverted aggregate clock can otherwise mark a
@@ -298,11 +506,17 @@
         return effectiveDte;
     }
 
+    /**
+     * @param {unknown} value
+     */
     function _normalizeIsoDate(value) {
         const normalized = String(value || '').trim().replace(/\//g, '-');
         return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : '';
     }
 
+    /**
+     * @param {unknown} value
+     */
     function _parseIsoUtcDate(value) {
         const normalized = _normalizeIsoDate(value);
         if (!normalized) return null;
@@ -321,22 +535,40 @@
     // with only minutes left cannot absorb a material asynchronous move.
     const MAX_LOCAL_IV_QUOTE_SKEW_MS = 30000;
 
+    /**
+     * @param {unknown} value
+     */
     function _parseTimestamp(value) {
         const parsed = Date.parse(String(value || '').trim());
         return Number.isFinite(parsed) ? parsed : null;
     }
 
+    /**
+     * @param {string} calendarKey
+     */
     function _tradeDateRolloverHour(calendarKey) {
         return /^(?:CME|NYMEX|COMEX):/.test(String(calendarKey || '').toUpperCase())
             ? 17
             : null;
     }
 
+    /**
+     * @param {PricingLeg | null} leg
+     * @param {string | null} expiryDate
+     * @param {OptionComboUnderlyingProfile | null} profile
+     */
     function _resolveExpiryCutoffMs(leg, expiryDate, profile) {
         if (typeof resolveExpiryCutoffAsOf !== 'function') return null;
         return resolveExpiryCutoffAsOf(leg, profile, expiryDate || null);
     }
 
+    /**
+     * @param {PricingLeg | null} leg
+     * @param {string} simulatedDate
+     * @param {string} quoteDate
+     * @param {string} quoteAsOf
+     * @param {OptionComboUnderlyingProfile | null} profile
+     */
     function resolveSameDayLiveTiming(leg, simulatedDate, quoteDate, quoteAsOf, profile) {
         const expiryDate = _normalizeIsoDate(leg && leg.expDate);
         if (!expiryDate || _normalizeIsoDate(simulatedDate) !== expiryDate
@@ -356,6 +588,17 @@
         };
     }
 
+    /**
+     * @param {PricingLeg} leg
+     * @param {string} simulatedDate
+     * @param {string | null} quoteDate
+     * @param {OptionComboUnderlyingProfile | null} profile
+     * @param {string} marketDataMode
+     * @param {TimingContext | null} timingContext
+     * @param {string} calendarKey
+     * @param {OptionComboWeekendWeight} weekendWeight
+     * @returns {ExactLegTiming}
+     */
     function _resolveExactLegTiming(
         leg,
         simulatedDate,
@@ -519,7 +762,7 @@
             || profile && profile.optionExpiryTimeZone
             || 'America/New_York';
         const rolloverHour = _tradeDateRolloverHour(calendarKey);
-        const resolveInterval = (startMs, endMs) => resolveWeightedTime(
+        const resolveInterval = (/** @type {number} */ startMs, /** @type {number} */ endMs) => resolveWeightedTime(
             startMs,
             endMs,
             weekendWeight,
@@ -580,6 +823,9 @@
         };
     }
 
+    /**
+     * @param {number} x
+     */
     function normalCDF(x) {
         let sign = (x < 0) ? -1 : 1;
         x = Math.abs(x) / Math.sqrt(2.0);
@@ -590,15 +836,37 @@
         return 0.5 * (1.0 + sign * y);
     }
 
+    /**
+     * @param {number} S
+     * @param {number} K
+     * @param {number} T
+     * @param {number} r
+     * @param {number} v
+     * @param {number} [rateT]
+     */
     function calculateD1(S, K, T, r, v, rateT = T) {
         const resolvedRateT = Number.isFinite(rateT) && rateT >= 0 ? rateT : T;
         return (Math.log(S / K) + r * resolvedRateT + (v * v / 2) * T) / (v * Math.sqrt(T));
     }
 
+    /**
+     * @param {number} d1
+     * @param {number} v
+     * @param {number} T
+     */
     function calculateD2(d1, v, T) {
         return d1 - v * Math.sqrt(T);
     }
 
+    /**
+     * @param {string} type
+     * @param {number} S
+     * @param {number} K
+     * @param {number} T
+     * @param {number} r
+     * @param {number} v
+     * @param {number} [rateT]
+     */
     function calculateOptionPrice(type, S, K, T, r, v, rateT = T) {
         if (T <= 0) {
             if (type === 'call') return Math.max(0, S - K);
@@ -631,6 +899,13 @@
      * d1 = [ln(F/K) + (σ²/2)T] / σ√T
      * Call = e^(-rT) [F·N(d1) − K·N(d2)]
      * Put  = e^(-rT) [K·N(−d2) − F·N(−d1)]
+     * @param {string} type
+     * @param {number} F
+     * @param {number} K
+     * @param {number} T
+     * @param {number} r
+     * @param {number} v
+     * @param {number} [rateT]
      */
     function calculateBlack76Price(type, F, K, T, r, v, rateT = T) {
         if (T <= 0) {
@@ -661,6 +936,16 @@
     /**
      * Dispatch to the appropriate pricing model.
      * @param {string} pricingModel - 'bsm-spot' or 'black76'
+     * @param {string} type
+     * @param {number} S
+     * @param {number} K
+     * @param {number} T
+     * @param {number} r
+     * @param {number} v
+     * @param {number} [rateT]
+     * @param {number} [dividendYield]
+     * @param {number} [binomialSteps]
+     * @returns {number}
      */
     function calculatePrice(
         pricingModel,
@@ -699,6 +984,14 @@
         return calculateOptionPrice(type, S, K, T, r, v, rateT);
     }
 
+    /**
+     * @param {string} pricingModel
+     * @param {string} type
+     * @param {number} underlyingPrice
+     * @param {number} strike
+     * @param {number} rate
+     * @param {number} rateT
+     */
     function _optionPriceBounds(pricingModel, type, underlyingPrice, strike, rate, rateT) {
         const discount = Math.exp(-rate * rateT);
         if (pricingModel === 'american-binomial') {
@@ -740,6 +1033,17 @@
      * lives on the supplied variance clock T; rateT remains the independent
      * ACT/365 discount clock.  Bounds are checked before bisection so crossed
      * or asynchronous quotes fail closed instead of producing an extreme IV.
+     * @param {string} pricingModel
+     * @param {string} type
+     * @param {number} underlyingPrice
+     * @param {number} strike
+     * @param {number} T
+     * @param {number} rate
+     * @param {number} optionPrice
+     * @param {number} [rateT]
+     * @param {number} [dividendYield]
+     * @param {number} [binomialSteps]
+     * @returns {ImpliedVolatilityResult}
      */
     function solveImpliedVolatility(
         pricingModel,
@@ -913,6 +1217,15 @@
         };
     }
 
+    /**
+     * @param {PricingLeg} leg
+     * @param {string} pricingModel
+     * @param {ExactLegTiming} exactTiming
+     * @param {TimingContext | null} timingContext
+     * @param {OptionComboWeekendWeight} weekendWeight
+     * @param {boolean} [americanFuturesMode]
+     * @returns {LocalIvAnchor}
+     */
     function _resolveLocalBboIvAnchor(
         leg,
         pricingModel,
@@ -1023,6 +1336,10 @@
         };
     }
 
+    /**
+     * @param {OptionComboUnderlyingProfile | string | null | undefined} profileOrSymbol
+     * @returns {OptionComboUnderlyingProfile | null}
+     */
     function resolveInstrumentProfile(profileOrSymbol) {
         if (!profileOrSymbol) return null;
 
@@ -1037,6 +1354,9 @@
         return null;
     }
 
+    /**
+     * @param {OptionComboUnderlyingProfile | string | null | undefined} profileOrSymbol
+     */
     function getMultiplier(profileOrSymbol) {
         const profile = resolveInstrumentProfile(profileOrSymbol);
         if (profile && Number.isFinite(profile.optionMultiplier)) {
@@ -1045,6 +1365,9 @@
         return 100;
     }
 
+    /**
+     * @param {OptionComboUnderlyingProfile | string | null | undefined} profileOrSymbol
+     */
     function getUnderlyingLegMultiplier(profileOrSymbol) {
         const profile = resolveInstrumentProfile(profileOrSymbol);
         if (profile && Number.isFinite(profile.underlyingLegMultiplier)) {
@@ -1053,6 +1376,9 @@
         return 1;
     }
 
+    /**
+     * @param {OptionComboUnderlyingProfile | string | null | undefined} profileOrSymbol
+     */
     function getSettlementUnitsPerContract(profileOrSymbol) {
         const profile = resolveInstrumentProfile(profileOrSymbol);
         if (profile && Number.isFinite(profile.settlementUnitsPerContract)) {
@@ -1061,18 +1387,35 @@
         return 100;
     }
 
+    /**
+     * @param {unknown} legOrType
+     */
     function isUnderlyingLeg(legOrType) {
-        return productRegistry.isUnderlyingLeg(legOrType);
+        // Unlike resolveInstrumentProfile(), this assumes product_registry.js
+        // loaded first: every page that loads this file loads it before.
+        return /** @type {OptionComboProductRegistryApi} */ (productRegistry).isUnderlyingLeg(legOrType);
     }
 
+    /**
+     * @param {PricingLeg | null | undefined} leg
+     */
     function isLiveIvMissing(leg) {
         return !!(leg && leg.ivSource === 'missing');
     }
 
+    /**
+     * @param {PricingLeg | null | undefined} leg
+     * @returns {leg is PricingLeg & {iv: number}}
+     */
     function hasUsableLegIv(leg) {
-        return !isLiveIvMissing(leg) && Number.isFinite(leg && leg.iv) && leg.iv > 0;
+        return !isLiveIvMissing(leg) && Number.isFinite(leg && leg.iv)
+            && /** @type {{iv: number}} */ (leg).iv > 0;
     }
 
+    /**
+     * @param {PricingLeg | null | undefined} leg
+     * @returns {leg is PricingLeg & {currentPrice: number}}
+     */
     function hasUsableCurrentQuote(leg) {
         const source = String(leg && leg.currentPriceSource || '').trim();
         return !!(
@@ -1087,15 +1430,21 @@
         );
     }
 
+    /**
+     * @param {PricingLeg | null | undefined} leg
+     */
     function formatLegIvInputValue(leg) {
         if (isLiveIvMissing(leg)) {
             return 'N/A';
         }
 
-        const iv = Number.isFinite(leg && leg.iv) ? leg.iv : 0;
+        const iv = Number.isFinite(leg && leg.iv) ? /** @type {{iv: number}} */ (leg).iv : 0;
         return `${(iv * 100).toFixed(4)}%`;
     }
 
+    /**
+     * @param {PricingLeg | null | undefined} leg
+     */
     function describeLegIvInput(leg) {
         if (isUnderlyingLeg(leg)) {
             return {
@@ -1138,6 +1487,19 @@
         };
     }
 
+    /**
+     * @param {PricingLeg} leg
+     * @param {string} globalSimulatedDateStr
+     * @param {number} globalIvOffset
+     * @param {string | null} [globalQuoteDateStr]
+     * @param {number | null} [globalUnderlyingPrice]
+     * @param {number | null} [globalInterestRate]
+     * @param {string} [viewMode]
+     * @param {OptionComboUnderlyingProfile | string | null} [instrumentProfile]
+     * @param {string} [marketDataMode]
+     * @param {TimingContext | null} [timingContext]
+     * @returns {ProcessedLeg}
+     */
     function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalQuoteDateStr = null, globalUnderlyingPrice = null, globalInterestRate = null, viewMode = 'active', instrumentProfile = null, marketDataMode = 'live', timingContext = null) {
         const resolvedProfile = resolveInstrumentProfile(instrumentProfile);
         const profilePricingModel = (resolvedProfile && resolvedProfile.pricingModel) || 'bsm-spot';
@@ -1268,9 +1630,10 @@
                     // quote clock solved above; keep it fixed for the target
                     // clock and apply only the user's explicit scenario bump.
                     if (localIvAnchor.available) {
+                        // An available anchor always carries its solved IV.
                         effectiveBaseIv = Math.max(
                             1e-8,
-                            localIvAnchor.impliedVolatility + globalIvOffset
+                            /** @type {number} */ (localIvAnchor.impliedVolatility) + globalIvOffset
                         );
                     } else if (allowProjectionIvFallback) {
                         // A live BBO can exist yet fail inversion because one
@@ -1419,7 +1782,8 @@
                         leg.strike,
                         quoteT,
                         globalInterestRate,
-                        leg.iv,
+                        // baseIv !== null means hasUsableLegIv(leg) held.
+                        /** @type {number} */ (leg.iv),
                         quoteT,
                         dividendYield,
                         americanBinomialSteps
@@ -1502,6 +1866,12 @@
         };
     }
 
+    /**
+     * @param {ProcessedLeg} processedLeg
+     * @param {number} underlyingPrice
+     * @param {number} interestRate
+     * @returns {number | null}
+     */
     function computeLegPrice(processedLeg, underlyingPrice, interestRate) {
         if (processedLeg.isUnderlyingLeg || isUnderlyingLeg(processedLeg.type)) {
             return Number.isFinite(underlyingPrice) && underlyingPrice > 0
@@ -1526,24 +1896,33 @@
         if (!Number.isFinite(processedLeg.simIV) || processedLeg.simIV <= 0) {
             return null;
         }
+        // processLegData() leaves simIV null whenever it leaves T null, so a
+        // finite simIV proves T is a number.
         return calculatePrice(
             processedLeg.pricingModel || 'bsm-spot',
             processedLeg.type,
             underlyingPrice,
             processedLeg.strike,
-            processedLeg.T,
+            /** @type {number} */ (processedLeg.T),
             interestRate,
             processedLeg.simIV,
-            Number.isFinite(processedLeg.rateT) ? processedLeg.rateT : processedLeg.T,
+            Number.isFinite(processedLeg.rateT) ? processedLeg.rateT : /** @type {number} */ (processedLeg.T),
             Number.isFinite(processedLeg.dividendYield) ? processedLeg.dividendYield : 0,
             processedLeg.binomialSteps
         );
     }
 
+    /**
+     * @param {unknown} viewMode
+     */
     function isLiquidationViewMode(viewMode) {
         return String(viewMode || '').trim().toLowerCase() === 'liquidation';
     }
 
+    /**
+     * @param {ProcessedLeg | null | undefined} processedLeg
+     * @param {number} underlyingPrice
+     */
     function computeIntrinsicPrice(processedLeg, underlyingPrice) {
         if (!processedLeg) return null;
         if (processedLeg.isUnderlyingLeg || isUnderlyingLeg(processedLeg.type)) {
@@ -1563,6 +1942,17 @@
         return null;
     }
 
+    /**
+     * @param {ProcessedLeg} processedLeg
+     * @param {PricingLeg} rawLeg
+     * @param {number} underlyingPrice
+     * @param {number} interestRate
+     * @param {string} viewMode
+     * @param {string} simulatedDate
+     * @param {string} baseDate
+     * @param {number} ivOffset
+     * @returns {number | null | undefined}
+     */
     function computeSimulatedPrice(processedLeg, rawLeg, underlyingPrice, interestRate, viewMode, simulatedDate, baseDate, ivOffset) {
         if (rawLeg.closePrice !== null && rawLeg.closePrice !== '') {
             const parsedClose = parseFloat(rawLeg.closePrice);
@@ -1635,6 +2025,7 @@
     /**
      * Analysis defaults to the best available estimate. Strict BBO remains an
      * explicit diagnostic mode; historical replay keeps its recorded-IV path.
+     * @param {unknown} value
      */
     function normalizeProjectionConvergenceMode(value) {
         const normalized = String(value || '').trim().toLowerCase();
@@ -1644,6 +2035,9 @@
         return 'best-effort-input-iv';
     }
 
+    /**
+     * @param {PricingLeg | null | undefined} leg
+     */
     function _hasFixedProjectionPrice(leg) {
         if (!leg || leg.closePrice === null || leg.closePrice === ''
             || leg.closePrice === undefined) return false;
@@ -1651,6 +2045,11 @@
         return Number.isFinite(value) && value >= 0;
     }
 
+    /**
+     * @param {ProjectionState | null | undefined} globalState
+     * @param {PricingLeg[] | null | undefined} rawLegs
+     * @param {ProcessedLeg[] | null | undefined} processedLegs
+     */
     function assessProjectionConvergence(globalState, rawLegs, processedLegs) {
         const state = globalState && typeof globalState === 'object' ? globalState : {};
         const mode = normalizeProjectionConvergenceMode(state.projectionConvergenceMode);
@@ -1739,6 +2138,7 @@
 
         const legs = Array.isArray(rawLegs) ? rawLegs : [];
         const processed = Array.isArray(processedLegs) ? processedLegs : [];
+        /** @type {ConvergenceFailure[]} */
         const failures = [];
         legs.forEach((leg, index) => {
             const pLeg = processed[index];
@@ -1807,6 +2207,10 @@
         };
     }
 
+    /**
+     * @param {{ready?: boolean, affectedLegIds?: string[], failures?: ConvergenceFailure[]} | null | undefined} assessment
+     * @param {string} [subject]
+     */
     function formatProjectionConvergenceFailure(assessment, subject = 'Simulation') {
         if (!assessment || assessment.ready !== false) return '';
         const legIds = Array.isArray(assessment.affectedLegIds)
@@ -1833,6 +2237,11 @@
         return `${subject} unavailable: strict live convergence requires a fresh valid two-sided BBO and successful local IV inversion for every option leg still alive at the simulation target${suffix}.`;
     }
 
+    /**
+     * @param {string | null | undefined} status
+     * @param {string} [subject]
+     * @param {{missingWeightDates?: string[]} | null} [details]
+     */
     function formatProjectionTimingFailure(status, subject = 'Simulation', details = null) {
         if (status === 'implied_lambda_incomplete') {
             const missingDates = details && Array.isArray(details.missingWeightDates)
