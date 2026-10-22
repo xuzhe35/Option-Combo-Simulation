@@ -15,6 +15,7 @@ const PAGES = [
     'workspace_db_admin.html',
     'cost_basis.html',
     'cost_basis_fop.html',
+    'portfolio_snapshot.html',
 ];
 const HASH_LENGTH = 12;
 const ASSET_REFERENCE = /\b(?:src|href)="([A-Za-z0-9_./-]+\.(?:js|css))(?:\?v=([^"]*))?"/g;
@@ -85,6 +86,7 @@ module.exports = {
                     'workspace_db_admin.html': 3,
                     'cost_basis.html': 4,
                     'cost_basis_fop.html': 3,
+                    'portfolio_snapshot.html': 5,
                 };
                 PAGES.forEach((pageName) => {
                     const references = collectReferences(pageName);

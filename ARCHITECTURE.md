@@ -38,6 +38,118 @@ Runtime surfaces:
 
 ## 2. Frontend Entry Surfaces
 
+### `portfolio_snapshot.html` (P0/P1 preview)
+
+An independent image-to-Portfolio review page with its own schema, DOM-free
+core and OCR normalizer. It stores only a browser-memory snapshot and exposes
+`window.__portfolioSnapshot.getSnapshot()` as a detached inspection copy.
+Source rows retain summary/combo hierarchy; only atomic position rows enter
+`positions`. Original recognition and manual changes remain separate. No
+ledger, market data, pricing, order or persistence runtime is loaded.
+
+`scripts/portfolio_snapshot_ocr_server.py` is an optional, isolated loopback
+HTTP preview service on 8798. It serves only a static allowlist and bounded
+JSON image requests, runs the temporary native Vision helper on macOS, and
+returns untrusted words/boxes. The browser validates and maps the supported
+TWS columns, then requires manual review. Vision additionally rereads bounded
+text crops at two resolutions. Only aligned, agreeing short-code readings may
+change a description candidate; original words, both rereads and per-field
+correction evidence remain in the snapshot. Numbers and ellipsis-truncated
+words cannot be changed by this step. There is no symbol dictionary/substitution.
+Production `reviewProtocol: 1` additionally verifies each contract row with
+2x/3x/4x bounded crops. At least two complete parsed identities must agree;
+another complete identity blocks the row even if two others agree. Incomplete
+readings remain in `allPasses`, without homoglyph or ticker replacements.
+Only the agreeing pair supplies the measured indentation. Numeric-only rows
+are unclassified candidates, not decoration, and can recover their description
+from their own crop. Every average-price cell requires bounded 3x/4x agreement;
+failed reads become null with a field problem. Changing a row identity also
+requires independent daily-P&L cell evidence. Numeric values in other columns
+stay with the original row. All before/after values, accepted and unsuccessful
+crop readings survive export and batch confirmation. This protocol adds no
+column tolerance or separate native calibration.
+Header profiles are explicit: abbreviated FIN INSTRUMENT / PTF THETA requires
+12 columns with IV; the expanded FINANCIAL INSTRUMENT / PORTF THETA presentation
+may end at LAST with 11 columns. Both crop reads must agree on the profile and
+all labels, and unknown labels still reject. There is no fabricated IV interval;
+`columnIndex` uses only actual intervals and absent IV is annotated in field
+evidence. Header padding is a bounded retry for genuinely invalid measured
+coordinates, not the default; pure frame words may use pixel-measured line
+bounds while retaining their loose observation rectangle. Coordinate and label
+overlap checks are unchanged. Missing/invalid numeric cells (excluding LAST
+prefixes) may use same-cell 3x/4x evidence; detected glyphs that remain unreadable
+have `visible_numeric_ink_unread` evidence and a field problem instead of a zero.
+Complete contract identity consumes the supported description, including its
+exchange suffix. A label-only or malformed suffix is not a competing complete
+contract; another complete contract with different terms still blocks the row.
+The explicit FOP class slot also permits malformed bracket tokens as reread
+inputs; only two aligned canonical class readings can change them. A visible
+FOP marker retains FOP type even when its class cannot be resolved.
+Separately, option-type tokens after expiry and strike accept CA/CAL and PU
+prefixes as CALL/PUT, retaining their raw truncation and interpretation evidence.
+The browser uniquely locates all expected column labels in order and derives
+the intervals from their actual coordinates; ambiguous/missing/extra header
+words refuse recognition. Two full-header crops each validate the complete
+label set. Native repeated numeric right edges and nearby ink gaps propose
+fused-word crop cuts; two-scale fragment text must reconstruct the fused token,
+and the browser requires one supported semantic split with measured coordinates.
+The known E+ instrument-header suffix is consumed explicitly; an OCR 'A' is a
+sort control only with filled-triangle pixel evidence. Column calibration lives
+only in the browser. Colored-square pixel evidence can exclude a distant status
+badge from numeric cells; narrow, uniform vertical border evidence permits a
+separate numeric crop reread with the original token and sign preserved.
+For a
+missing POS value, it sends bounded cell regions with the image to the helper
+in a second request (same hash/dimensions/generation binding). Swift only checks
+crop bounds and rereads the requested cells at 3x/4x with neutral padding.
+The browser accepts one aligned
+crop with two agreeing numeric readings; first-pass values, invalid existing
+text and neighboring rows cannot be overwritten. The cell crop and both passes
+are retained separately from original words and summary rows.
+Isolated numeric glyphs missed by the line detector can be reread as repeated
+copies of the same source patch, without synthetic text or character templates.
+Complete repeated text, source geometry and agreeing 3x/4x values are required;
+a neutral-ink contrast retry uses the existing source-ink thresholds. Evidence
+retains the source patch, copy text, montage geometry and preprocessing. LAST
+gets bounded rereads for missing/punctuation values, while source letter
+qualifiers stay unknown. A tight numeric crop excludes a nearby ornament only
+with filled-square color proof and no neutral text pixels; the original
+remote-square spacing criterion is unchanged.
+An unsuccessful second request preserves the original evidence, keeps unverified
+contract rows unclassified, leaves missing quantity null and adds a persistent
+warning; cancel/abort still cancels.
+Decoration rows are skipped by hierarchy lookahead and never push, pop or clear
+the parent stack. Totals and cash still close combo scope.
+Bulk review presents a single acknowledgement list for machine changes to
+all editable fields, then confirms positions and cash (including filtered rows),
+without removing missing-field or hierarchy warnings or claiming full coverage.
+Critical machine-change markers persist after review. Structure decisions bind
+to the issue, run and combo graph; reasons and exclusions retain source evidence.
+Rows without aligned numeric/single-contract evidence, and non-table footer
+text, are decoration. Additional possible positions after cash are unresolved,
+not auto-imported. Snapshot OCR account-like text is masked recursively; explicit
+manual account metadata is retained. Compact JSON export/import share a 32 MiB
+limit and refuse oversize exports. Row grouping follows text height rather than
+a fixed image-height floor. STK value/quantity checks respect display rounding.
+Combo structure is a stack of indentation levels with single-contract checks;
+unknown expanded strategy names use that structure, while names only provide
+hints for collapsed groups. Peer rows end a group without waiting for TOTAL.
+Nested combo metadata lists visible atomic descendants once, and JSON validation
+checks cycles, source roles and leg membership. Partial/unclassified structures
+stay visible for review, and no expected leg count is guessed.
+For indentation, the native helper measures contrasting glyph pixels within
+each enlarged short-code region; OCR rectangles alone may agree on leading
+background and are insufficient. Two aligned, agreeing word readings with
+close glyph starts supply an interval for indentation. A child must be
+strictly deeper than its parent's interval plus the existing layout tolerance;
+boundary disagreement stays a visible ambiguity. Original boxes, crop boxes,
+glyph measurements and parent/leg evidence survive JSON round trips.
+Host/Origin/peer checks restrict the
+service to loopback; raw account data and images are not logged or retained after the request.
+This early OCR adapter intentionally does not alter either shared backend or
+their broker-facing WebSocket dispatchers. Future WS/database integration
+remains subject to the CODE PLAN; P0/P1 do not implement it.
+
 ### `index.html`
 
 The main app shell owns:

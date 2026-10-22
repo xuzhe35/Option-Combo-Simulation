@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "rowTypes": ["position", "cash", "group_summary", "combo_summary", "unclassified"],
+  "instrumentTypes": ["STK", "OPT", "FUT", "FOP", "UNKNOWN"],
+  "numericStorage": "decimal_string_or_null",
+  "accountSource": "manual",
+  "defaultAsOf": null,
+  "defaultCoverage": "visible_only",
+  "positionSources": "position_rows_only_once",
+  "recognizedEqualsReviewed": false,
+  "fieldPaths": [
+    "instrument.symbol", "instrument.secType", "quantity", "instrument.expiryDate",
+    "instrument.right", "instrument.strike", "instrument.tradingClass", "instrument.currency",
+    "instrument.exchange", "instrument.multiplier", "displayValues.mark", "displayValues.displayIv",
+    "displayValues.costBasis", "displayValues.marketValue", "displayValues.avgPrice", "displayValues.dailyPnl",
+    "displayValues.unrealizedPnl", "displayValues.deltaDollars", "displayValues.theta", "displayValues.lastPrice"
+  ]
+}

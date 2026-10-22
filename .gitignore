@@ -21,6 +21,10 @@ config.local.ini
 # and P&L, and this repository is public.
 Reports/
 
+# Private portfolio screenshots, OCR goldens and acceptance reports.
+Portfolio SC/
+tests/private_portfolio_snapshot/
+
 # SQLite databases and every common sidecar/backup naming form. Runtime
 # portfolio and cost-basis databases contain real positions and trades and
 # must never enter this public repository, even if copied into the workspace.

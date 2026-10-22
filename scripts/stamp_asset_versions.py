@@ -40,6 +40,7 @@ PAGES = (
     'workspace_db_admin.html',
     'cost_basis.html',
     'cost_basis_fop.html',
+    'portfolio_snapshot.html',
 )
 
 HASH_LENGTH = 12

@@ -4,7 +4,7 @@
 
 Option Combo Simulator is a local browser workspace for building, pricing, replaying, monitoring, and optionally executing multi-leg option structures.
 
-The repo currently has five frontend surfaces:
+The repo has these frontend surfaces:
 
 1. `index.html` - main portfolio workspace
 2. `chart_lab.html` - shared workspace plus experimental daily-bar projection
@@ -12,6 +12,7 @@ The repo currently has five frontend surfaces:
 4. `cost_basis.html` - standalone per-account, per-underlying blended-cost ledger
    - `cost_basis_fop.html` - the standalone FOP ledger (CL futures and options on futures)
 5. `workspace_db_admin.html` - standalone workspace-database and archive admin page
+6. `portfolio_snapshot.html` - screenshot Portfolio with image drop, offline OCR, side-by-side review and in-memory JSON
 
 It also has two optional Python WebSocket backends:
 
@@ -19,6 +20,122 @@ It also has two optional Python WebSocket backends:
 - `historical_server.py` for historical replay snapshots only (chains via the shared options-chain-service)
 
 There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in ordered global-script form.
+
+### Screenshot Portfolio (P0/P1 preview)
+
+Open `portfolio_snapshot.html` from the new **截图 Portfolio** link in the cost
+ledger. Drag in one PNG/JPEG (up to 4 MiB), then click **识别持仓**. The original
+image, per-row crop, editable fields and original OCR text stay side by side.
+Click a field to scroll its enlarged source crop to the relevant column. Use
+**全部识别列** to inspect the financial columns. After visually checking the image,
+use **批量确认全部** for all positions and cash, including filtered-out rows;
+individual confirmation remains available. Editing reopens the changed row.
+Machine-filled or inferred fields are listed once before batch
+confirmation, including the first value and adopted value. Their markers stay
+visible after confirmation. Incomplete structures can be explicitly accepted
+with a reason; mistaken rows can be excluded while retaining the source.
+Account and screenshot date are manual inputs; expiration
+groups and notifications never supply them.
+
+For real offline recognition on macOS, start the isolated service:
+
+```bash
+python3 scripts/portfolio_snapshot_ocr_server.py
+```
+
+Then open [Screenshot Portfolio](http://127.0.0.1:8798/portfolio_snapshot.html).
+Opening the HTML directly as `file://` cannot connect to OCR; that page offers
+**打开识别页面** in a new tab. Reattach the image there; export any existing edits
+to JSON first. If the service starts after an HTTP page is opened, use
+**重新连接识别服务**; the loaded image and edits stay in memory.
+The service requires Apple's installed command-line tools (`swiftc`) and uses
+on-device Vision. First recognition compiles a temporary helper; later calls
+reuse it. No API key, cloud upload, broker connection or business database is
+involved. On other platforms the memory table/JSON editor works, while this
+preview's OCR adapter reports unavailable. Windows OCR is not implemented yet.
+
+Two explicit TWS presentations are supported: the existing 12-column FIN
+INSTRUMENT / PTF THETA layout including IV, and the expanded FINANCIAL
+INSTRUMENT / PORTF THETA presentation ending at LAST without IV. The expanded
+presentation can also include IV. Every label required by the selected
+presentation must be located uniquely and in order; missing IV in the existing
+abbreviated presentation still refuses recognition. An absent IV column stays
+unknown and is explained beside the field. Boundaries follow actual coordinates; ambiguous labels
+cause a Chinese rejection. Unknown header words also refuse recognition.
+Two enlarged header crops repair joined words; fused labels require agreeing
+fragment rereads and measured coordinates. Repeated body-number alignment only
+proposes crop cuts and never assigns columns or supplies a holding value.
+The browser sends bounded contract-row, average-price and empty quantity-cell
+regions in a second request; Swift contains no separate column calibration.
+Contract rows are read at 2x/3x/4x: at least two complete identities must agree,
+and any competing complete identity refuses the row. Incomplete readings are
+retained as evidence, never repaired by character substitution. Every average
+price, even a syntactically valid first reading, needs agreeing 3x/4x cell reads.
+If a contract identity changes, its daily P&L needs separate same-row cell proof.
+Unverified rows stay visible as unclassified; numeric-only rows cannot disappear
+as decoration. Failed or conflicting average reads stay unknown with a warning.
+Original readings, accepted readings and rejected crop evidence remain in JSON.
+Missing or invalid numeric cells also get bounded 3x/4x rereads; existing legal
+numbers are preserved (apart from mandatory average-price review). Unreadable
+source glyphs stay unknown with a field problem, never a default zero. When
+Vision misses an isolated glyph, the helper repeats the same tight source patch
+as a text line (optionally with neutral-ink contrast), requiring the complete
+repeated token and independent 3x/4x agreement. No expected character is drawn.
+LAST punctuation can receive a same-cell reread; letter qualifiers such as c/M
+are never requested as numeric replacements. A tight crop may exclude a status
+square only when its pixels prove a filled colored square without neutral text.
+The previous remote-square spacing rule remains unchanged. Field focus scrolls to the measured
+column, rather than fixed screen fractions. Edge-control coordinates remain
+strict: only an actually out-of-image header result triggers a padded retry;
+a window-frame word can use measured frame pixels with its original box retained.
+If the second request fails, unverified rows are not counted as positions.
+Pixel-proven status
+squares and narrow vertical frame edges have separate retained evidence;
+negative signs are never removed by text replacement. Indented decoration
+does not demote a position or interrupt a combo's legs.
+STK quantity × MARK is checked against displayed market value with rounding
+tolerance, and discrepancies stay visible without changing values.
+Short codes are reread from enlarged source pixels at 2x and 3x; agreeing results
+retain the first reading and both crop readings beside the editable field.
+FOP class punctuation is corrected only when both aligned crop readings agree
+in the explicit FOP class slot; an unresolved class keeps the known FOP type
+and a warning. Combo indentation uses actual contrasting glyph edges from
+both crops, rather than OCR rectangles that may contain leading background.
+The original position and both measurements remain in JSON; boundary
+disagreement stays unresolved. Combo legs show **组合缩进已复核** when this evidence
+supports their membership. No parent is counted as an extra position.
+There is no ticker replacement dictionary. All rows still start unreviewed.
+After an expiry and strike, `CA`/`CAL` prefixes identify CALL and `PU` identifies
+PUT (including ellipsis truncation); raw text and the interpretation stay
+visible. Other uncertain fields stay unknown. Empty POS cells use a separate
+bounded fallback: 3x and 4x crops must
+agree on the same row and column before filling a quantity. First-pass
+missing values and both crop readings remain visible; existing numbers are
+never overwritten and summary totals are not used to infer positions.
+Originals and their scaled/compressed versions are checked separately against
+private visual transcriptions of all 20 editable fields, including explicit
+unknowns, row roles and combo membership. See
+`CODE PLAN/PORTFOLIO_SCREENSHOT_OCR_VALIDATION.md` for exact evidence and limits.
+Expanded combos use indentation and single-contract structure, including
+previously unseen strategy names and nested groups. Only visible atomic legs
+enter the Portfolio. Combo cards list those legs and link to the original
+image; collapsed, incomplete or ambiguous groups show a visible warning and
+never generate inferred legs. Synthetic checks cover 2/3/4/6 legs, calendars,
+ratios, straddles/strangles, butterflies, condors and stock/option combinations.
+This does not establish accuracy on every other screenshot or layout.
+JSON export/import preserves revisions made in memory and raw evidence.
+OCR account-like strings are masked throughout the snapshot; only the account
+explicitly entered by the user is retained. Export is compact JSON with the
+same 32 MiB limit as import, and oversized exports are refused explicitly.
+The older single-image totals include 72/81 unknown fields: non-null comparisons
+are 228/228 and 279/279 on the two original images. Scale/crop/JPEG perturbation
+checks are recorded separately: all six preset variants now match every field,
+row role, combo graph and cash row (validation §14). This is a bounded regression
+set; uncertain headers still refuse recognition. These references have not received formal user
+sign-off for a later phase.
+JSON does **not** include the original image; reattach the matching image to review
+an imported JSON. Reloading clears unexported work. Database/archive and stress
+features are deferred.
 
 ## Current Shipped Capabilities
 

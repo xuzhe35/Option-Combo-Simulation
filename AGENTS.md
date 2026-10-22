@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repo is a local browser app with six frontend surfaces and two optional Python backends.
+This repo is a local browser app with seven frontend surfaces, two optional Python backends and an isolated OCR preview service.
 
 Frontend surfaces:
 
@@ -12,6 +12,7 @@ Frontend surfaces:
 - `cost_basis.html` for the standalone per-underlying blended-cost ledger
 - `cost_basis_fop.html` for the standalone FOP ledger (CL futures and options on futures)
 - `workspace_db_admin.html` for the standalone workspace-database / archive admin page
+- `portfolio_snapshot.html` for screenshot OCR, manual review and an in-memory Portfolio JSON (P0/P1)
 
 Backend entry points:
 
@@ -29,6 +30,37 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 - `powershell_scripts/` for Windows launch and Python resolution helpers
 
 ## Frontend Entry Points
+
+- `portfolio_snapshot.html`
+  - independent screenshot Portfolio Tab, linked from `cost_basis.html`
+  - loads only `portfolio_snapshot_schema.js`, `portfolio_snapshot_core.js`,
+    `portfolio_snapshot_ocr.js`, `portfolio_snapshot.js`; no trading or ledger runtime
+  - PNG/JPEG drop, original-image row crops, original OCR per field, manual corrections,
+    JSON import/export; account/date manual, unknowns never zero-filled, combo parents excluded
+  - optional isolated loopback preview: `python3 scripts/portfolio_snapshot_ocr_server.py`
+    at 8798; macOS offline Vision helper, no API key, no database or broker
+  - engine switch: the page sends `engine` ('rapidocr' default via
+    `scripts/portfolio_snapshot_rapidocr.py`, cross-platform, needs `pip install rapidocr
+    onnxruntime` in the server's Python; 'apple-vision' stays selectable and is the server's
+    fallback when RapidOCR is not installed). RapidOCR answers with reviewProtocol 2: rows from pixel `rowBands`
+    and every numeric cell adopted only on 3x/4x agreement whose sign matches the pixel
+    `leadingDash` and whose read pixels (`readBbox`) stay inside the requested crop.
+    RapidOCR is offered only when its bundled models match the pinned SHA-256; recognition
+    never downloads. Vision (protocol 1) rereads every legal numeric value in its own cell
+    (agreement confirms; an agreed reread that contradicts the first read leaves the value
+    unknown with both readings, as does DAILY P&L; no agreement is flagged unchecked). Cash keeps
+    its first reading, problem and corrections in the batch confirmation. Validation §20-§22
+  - original screenshots under `Portfolio SC/` and real goldens/results under
+    `tests/private_portfolio_snapshot/` are private and ignored; never commit them
+  - read `CODE PLAN/PORTFOLIO_SCREENSHOT_OCR_PLAN.md` and its validation record;
+    P0/P1 UI acceptance is distinct from OCR correctness; v2 matches the current
+    single-image golden, but other images/layouts are not thereby verified
+  - v2 short-code corrections require aligned 2x/3x crop agreement; retain the
+    first reading and both rereads, never add a ticker substitution dictionary
+  - expanded combos use indentation/atomic-contract structure, not a fixed strategy
+    name/leg-count list; parents never enter positions, peers close groups, collapsed
+    or ambiguous groups stay unresolved. Extend the structure regression suite
+    whenever changing these rules; do not infer missing legs or expected leg counts
 
 - `index.html`
   - shared portfolio shell

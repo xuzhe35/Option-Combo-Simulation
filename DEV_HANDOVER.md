@@ -4,6 +4,57 @@
 
 ## 1. Current Product State
 
+Screenshot Portfolio P0/P1: `portfolio_snapshot.html` is an independent memory-only
+review page; the optional loopback OCR service is
+`python3 scripts/portfolio_snapshot_ocr_server.py` (8798, macOS Vision + swiftc).
+No trading/backend/database integration. The ledger entry is relative so a
+static page still works when OCR is unavailable.
+
+Current audit remediation is in `CODE PLAN/PORTFOLIO_SCREENSHOT_OCR_VALIDATION.md`
+§19 (the five recovered fields, real browser JSON verification and the full
+24-input campaign; §18 retains the initial failure); keep the original review as the findings record. The existing
+12-column presentation remains strict; expanded FINANCIAL INSTRUMENT / PORTF
+THETA also supports 11 columns ending at LAST, with absent IV explicitly unknown.
+Actual headers drive column intervals; ambiguous or extra
+labels refuse recognition. Two full-header crops and aligned fragment rereads
+prove fused labels; repeated numeric right edges propose cuts only. Pixel
+proof distinguishes colored status squares and narrow vertical frame/gutter
+edges from numeric text. Decorations never interrupt the combo stack.
+Empty quantity cells use a second bounded
+crop request, bound to the same image hash/dimensions/generation; Swift has no
+column calibration. Failed second reads preserve the first pass with null
+quantity and a warning; unverified contract rows stay visible and do not count as positions. Explicit cancel still cancels. Review uses one all-field machine-change acknowledgement
+list, persistent markers, explicit structure decisions/exclusions, OCR account
+masking, compact JSON and a shared 32 MiB export/import limit. Database and
+stress features remain deferred.
+
+Checks: P0 13 / P1 14 / P2 71 cases; full Node 1381; Python boundaries 6.
+Production row review uses 2x/3x/4x bounded crops; at least two complete identities
+must agree and no competing complete identity may remain. Existing aligned 2x/3x
+context proof may refine a short code or an anchored exchange slot; there is no
+homoglyph/ticker replacement. Same-text duplicate observations need overlapping
+pixel boxes. All raw crop observations remain in JSON. Average prices require
+3x/4x same-cell agreement even when their first reading was legal. A changed row
+identity also requires separate daily-P&L evidence; totals never supply values.
+See §17's 18-input campaign, three independent visual goldens, remaining header
+refusals and explicit unknown LAST. Earlier six-preset results do not close
+these broader robustness cases or authorize a later-phase release.
+§19 recovers the new source's five unread fields with identical-source-patch
+text repetition (no synthetic characters) and a neutral-ink contrast retry,
+still requiring complete coverage and agreeing bounded 3x/4x reads. LAST
+punctuation gets same-cell rereads; source letter qualifiers stay unknown.
+All four originals pass, as does the new 70% image. Of 24 actual inputs, 17
+fully match, one retains a visible unclassified row and six refuse headers;
+the new 90% image has no remaining target zero failure but one indentation
+ambiguity. Keep these limits explicit; do not claim universal accuracy. Header padding must stay an
+invalid-coordinate retry: unconditional padding regresses otherwise valid inputs.
+Measured ink boxes take precedence over loose OCR boxes when deciding to retry.
+Do not use deterministic original-image repeats as robustness evidence, or
+unit-test success as an OCR quality gate. User sign-off remains outstanding
+before later phases. Private images/goldens/reports are ignored. Browser QA uses
+an isolated 8799 service and a static-only 8801 test portal; stop these test
+servers after use and keep the user-facing 8798 preview running.
+
 This repo is a shared browser workspace with two backend flavors, not just a single-page option sandbox.
 
 Current surfaces:
