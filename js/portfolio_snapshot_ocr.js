@@ -674,6 +674,8 @@
                     : f.path.startsWith('instrument.')&&originalValue!==value ? sourceRow.ocrRefinements.filter(r => r.status === 'agreed') : numericCorrections;
                 p.fieldEvidence[f.path] = { source: 'ocr', raw: raw ?? (f.path.startsWith('instrument.') ? rawCells.description : null),
                     originalValue, recognizedValue: value, corrections, reviewStatus: 'unreviewed', problem };
+                if (cellMode && entry.cellReviews[key] && !entry.cellReviews[key].blank && !entry.cellReviews[key].proof)
+                    p.fieldEvidence[f.path].cellCheck = 'unresolved';
                 if(!cellMode&&entry.numericChecks[key])p.fieldEvidence[f.path].cellCheck=entry.numericChecks[key];
                 if(!cellMode&&entry.numericConflicts[key])p.fieldEvidence[f.path].conflictingReadings=S.clone(entry.numericConflicts[key]);
                 if(f.path==='displayValues.displayIv'&&!layout.headers.some(h=>h.key==='displayIv'))p.fieldEvidence[f.path].availability='column_not_present';

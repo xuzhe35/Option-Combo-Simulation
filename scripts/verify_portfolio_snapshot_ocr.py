@@ -19,9 +19,12 @@ def normalize(raw):
     code = """
 const fs=require('node:fs');
 const {loadBrowserScripts}=require('./tests/helpers/load-browser-scripts');
-const c=loadBrowserScripts(['js/portfolio_snapshot_schema.js','js/portfolio_snapshot_core.js','js/portfolio_snapshot_ocr.js']);
+const c=loadBrowserScripts(['js/portfolio_snapshot_schema.js','js/portfolio_snapshot_core.js','js/portfolio_snapshot_ocr.js','js/portfolio_snapshot_codex.js']);
 try {
-const normalized=c.OptionComboPortfolioSnapshotOcr.normalize(JSON.parse(fs.readFileSync(0,'utf8')),'image-1');
+const raw=JSON.parse(fs.readFileSync(0,'utf8'));
+const normalized=raw.engine==='local-codex'&&raw.localReviewReply
+    ? c.OptionComboPortfolioSnapshotCodex.combine(raw,raw.localReviewReply,'image-1')
+    : (raw.engine==='local-codex'?c.OptionComboPortfolioSnapshotCodex:c.OptionComboPortfolioSnapshotOcr).normalize(raw,'image-1');
 c.OptionComboPortfolioSnapshotCore.applyRecognition(c.OptionComboPortfolioSnapshotSchema.empty('evaluation','test'),normalized);
 process.stdout.write(JSON.stringify(normalized));
 } catch (e) { process.stdout.write(JSON.stringify({normalizationError:e.message})); }
@@ -79,7 +82,7 @@ def compare(actual, golden):
             and [{k: row.get(k) for k in ('currency', 'amount')} for row in actual['cash']] == golden['cash']}
 
 
-PROTOCOLS = {'apple-vision': 1, 'rapidocr': 2}
+PROTOCOLS = {'apple-vision': 1, 'rapidocr': 2, 'local-codex': 3}
 
 
 def check_engine(reply, engine, stage):
@@ -122,13 +125,24 @@ def main():
                 request = urllib.request.Request(args.url.rstrip('/') + '/api/recognize',
                     data=json.dumps({'image': base64.b64encode(args.image.read_bytes()).decode(), 'engine': args.engine}).encode(),
                     headers={'Content-Type': 'application/json', 'X-Portfolio-Preview': '1'})
-                with urllib.request.urlopen(request, timeout=120) as response:
+                with urllib.request.urlopen(request, timeout=255 if args.engine == 'local-codex' else 120) as response:
                     raw = json.load(response)
                 check_engine(raw, args.engine, 'initial')
                 if args.raw_output:
                     args.raw_output.parent.mkdir(parents=True, exist_ok=True)
                     args.raw_output.write_text(json.dumps(raw))
                 initial = normalize(raw)
+                if args.engine == 'local-codex':
+                    payload = {'image': base64.b64encode(args.image.read_bytes()).decode(), 'engine': args.engine,
+                        'codexReview': {'firstRunId': raw['runId']}}
+                    request = urllib.request.Request(args.url.rstrip('/') + '/api/recognize', data=json.dumps(payload).encode(),
+                        headers={'Content-Type': 'application/json', 'X-Portfolio-Preview': '1'})
+                    with urllib.request.urlopen(request, timeout=255) as response:
+                        extra = json.load(response)
+                    check_engine(extra,args.engine,'review')
+                    if extra['sourceHash'] != raw['sourceHash'] or (extra['width'],extra['height']) != (raw['width'],raw['height']):
+                        raise ValueError('Local crop response identity mismatch')
+                    raw['localReviewReply'] = extra
                 crops = initial['recognition'].get('quantityCrops', [])
                 review_crops = initial['recognition'].get('reviewCrops', [])
                 if crops or review_crops:
@@ -138,7 +152,7 @@ def main():
                     if review_crops:
                         payload['reviewCrops'] = review_crops
                     request = urllib.request.Request(args.url.rstrip('/') + '/api/recognize', data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', 'X-Portfolio-Preview': '1'})
-                    with urllib.request.urlopen(request, timeout=120) as response:
+                    with urllib.request.urlopen(request, timeout=255 if args.engine == 'local-codex' else 120) as response:
                         extra = json.load(response)
                     check_engine(extra, args.engine, 'review')
                     if extra['sourceHash'] != raw['sourceHash'] or (extra['width'],extra['height']) != (raw['width'],raw['height']):

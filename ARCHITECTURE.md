@@ -47,6 +47,64 @@ Source rows retain summary/combo hierarchy; only atomic position rows enter
 `positions`. Original recognition and manual changes remain separate. No
 ledger, market data, pricing, order or persistence runtime is loaded.
 
+The opt-in TWS comparison (`CODE PLAN/PORTFOLIO_SNAPSHOT_TWS_CROSSCHECK_PLAN.md`)
+adds the DOM-free `js/portfolio_snapshot_tws_model.js` (TWS replies to normalized
+positions, identity matching, the comparison report), `js/portfolio_snapshot_tws.js`
+(a WebSocket client limited to the three existing snapshot reads; `ib_server_ws.py`
+hands unknown actions to the order dispatcher, so the whitelist is a safety boundary)
+and the panel controller `js/portfolio_snapshot_tws_panel.js`. The panel reads the
+JSON through `__portfolioSnapshot.getSnapshot()` and `__portfolioSnapshotView`
+(`selectPosition`, `onChange`, notified after every table render) and never writes
+it or any file; the result lives only in the page. Browser storage holds one key, the
+last answering backend `{host, port}`, so a remote `ib_server.py` is prefilled next time
+(the ledger's saved server is on another origin and is not shared). No backend code changed.
+
+The optional third engine, `local-codex`, uses the independent Python adapter
+`scripts/portfolio_snapshot_codex.py` and DOM-free browser module
+`js/portfolio_snapshot_codex.js`, loaded after the OCR normalizer. Protocol 3
+returns semantic rows and source strings in its whole-image phase, not OCR words
+or model-provided boxes.
+It classifies headers/rows with the installed Codex CLI and ChatGPT login,
+in an isolated temporary read-only run; the image goes to OpenAI's model.
+No project context, golden, plugins or MCP configuration is sent. A strict
+schema, parent-scope/graph checks, decimal parsing and the existing snapshot
+validation gate its candidate. AI coordinates are deliberately absent, and
+all values require manual review. Existing protocols 1/2 remain unchanged.
+The current transport is `scripts/portfolio_snapshot_codex_transport.py`: a
+private stdio app-server with an isolated configuration/model catalogue and a
+reference to the existing ChatGPT login. Explicit high effort is checked in the
+session response and on the turn; source-byte data URLs use original image
+detail and must match the app-server user-message echo. Native offline WebSocket
+wire tests decode the actual outbound bytes and verify original dimensions and
+hashes, with no external inference. Neither these transport checks nor the
+image echo claim numerical pixel proof. Warnings and any host/tool request fail
+closed. The browser additionally requires high/original provenance before
+normalizing any candidate. See validation §27 for controlled comparisons.
+Capabilities separately report loopback transport and each engine's offline
+or cloud processing; offline failure never automatically selects Codex.
+
+The second protocol-3 phase is explicit `codexReview: {firstRunId}` on the same
+bounded preview endpoint. `scripts/portfolio_snapshot_codex_review.py` uses
+Pillow-only neutral text projections to produce up to 64 full-width source-pixel
+line crops; it does not run OCR, assign numeric columns or use model coordinates.
+A fresh high/original app-server session receives the original for header context
+plus labelled crops, with no first-pass values. The transport verifies every
+additional image echo/hash. Both HTTP replies bind to the selected engine,
+protocol, model, source dimensions/hash and first run. Malformed replies abort
+the whole replacement, retaining the user's previous Portfolio.
+`OptionComboPortfolioSnapshotCodex.combine` independently validates bounded,
+ordered crop proofs and one semantic result per crop; complete ordered body
+row types must match the first pass before association by visual order. It never
+matches by a potentially wrong strike/ticker/number, fills a missing value,
+changes an identity or reparents a combo. Unalignable valid results stay pending.
+Both raw readings and canonical interpretations are retained per field; conflicts
+go in `recognition.localReviewIssues`, separate from combo `structureIssues`.
+The core keeps unresolved local issues pending through ordinary confirmation.
+Human edits resolve their field's pending issue while retaining history; the
+page also offers one explicit batch decision for all remaining local issues.
+All semantic/number guards remain; neither agreement nor a measured text band
+proves that a numerical value belongs to its actual column. See validation §28.
+
 `scripts/portfolio_snapshot_ocr_server.py` is an optional, isolated loopback
 HTTP preview service on 8798. It serves only a static allowlist and bounded
 JSON image requests, runs the temporary native Vision helper on macOS, and

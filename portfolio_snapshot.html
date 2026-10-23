@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>截图 Portfolio — Option Combo</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="portfolio_snapshot.css?v=006cd777ddc0">
+    <link rel="stylesheet" href="portfolio_snapshot.css?v=928bcf30fd09">
 </head>
 <body data-option-combo-page="portfolio-snapshot">
     <aside class="sidebar">
@@ -13,23 +13,23 @@
         <div class="nav-caption">PORTFOLIO</div>
         <div class="nav-current"><span>▧</span> 截图 Portfolio <small>独立持仓快照</small></div>
         <a class="nav-link" href="http://127.0.0.1:8000/cost_basis.html" target="_blank" rel="noopener">↗ 综合成本账本</a>
-        <div class="sidebar-bottom"><span class="local-dot"></span> 本机离线识别<p>图片与持仓保留在内存<br>导出 JSON 后可自行留档</p></div>
+        <div class="sidebar-bottom"><span class="local-dot"></span> <span id="processing-scope">本机离线识别</span><p>持仓保留在页面内存<br>导出 JSON 后可自行留档</p></div>
     </aside>
     <div class="workspace">
         <header class="topbar"><div><span class="eyebrow">SCREENSHOT WORKSPACE</span><h1>截图 Portfolio</h1></div>
-            <div class="top-actions"><span id="service-status" class="pill">正在检查本机识别</span><button id="export-json" disabled>↓ 导出 JSON</button></div>
+            <div class="top-actions"><span id="service-status" class="pill">正在检查本机识别</span><button id="import-json" class="primary" type="button">↑ 导入 JSON</button><button id="export-json" disabled>↓ 导出 JSON</button></div>
         </header>
         <main>
-            <section class="intro"><div><h2>把截图变成可核对的持仓。</h2><p>原图与识别结果并排，对照检查、按需修改，一键确认。</p></div><span class="stage-label">01 / 图片识别与人工核验</span></section>
+            <section class="intro"><div><h2>把截图变成可核对的持仓。</h2><p>可直接拖入 Codex 生成的 JSON，再拖入同一原图逐项核验；也可继续使用下方识别引擎。</p></div><span class="stage-label">01 / 图片识别与人工核验</span></section>
             <section class="import-panel">
-                <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="选择或拖入持仓截图">
-                    <span class="upload-symbol" aria-hidden="true">↑</span><div><strong id="upload-title">拖入持仓截图，或点击选择图片</strong><span id="upload-caption">PNG / JPEG · 单张不超过 4 MiB · 请保留完整表头</span></div>
-                    <span class="choose-label">选择图片</span>
+                <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="选择或拖入持仓截图或 Portfolio JSON">
+                    <span class="upload-symbol" aria-hidden="true">↑</span><div><strong id="upload-title">拖入持仓截图或 Portfolio JSON</strong><span id="upload-caption">PNG / JPEG ≤ 4 MiB · JSON ≤ 32 MiB · 一次一个文件</span></div>
+                    <span class="choose-label">选择文件</span>
                 </div>
-                <input id="image-file" type="file" accept="image/png,image/jpeg" hidden>
+                <input id="image-file" type="file" accept="image/png,image/jpeg,application/json,.json" hidden>
                 <div id="file-mode-notice" class="message" role="status" hidden><strong>当前通过本地文件打开，无法连接图片识别。</strong><br>请点击下方「打开识别页面」，在新页面重新拖入图片。当前页面和校对内容会保留；已修改的表格请先导出 JSON。</div>
-                <div class="recognize-actions"><label class="zoom-label">识别引擎 <select id="ocr-engine" aria-label="识别引擎" disabled><option value="rapidocr" selected>RapidOCR（跨平台，默认）</option><option value="apple-vision">Apple Vision（macOS）</option></select></label><button id="recognize" class="primary" disabled>识别持仓 <span>↗</span></button><a id="open-ocr-page" class="primary-link" href="http://127.0.0.1:8798/portfolio_snapshot.html" target="_blank" rel="noopener" hidden>打开识别页面 ↗</a><button id="retry-service" hidden>重新连接识别服务</button><button id="cancel-ocr" hidden>取消识别</button><span id="recognize-note">点击识别后，仅交给本机 OCR 处理</span></div>
-                <details class="service-help"><summary>识别服务与启动说明</summary><p>两种引擎都在本机离线运行，图片不会上传云端：Apple Vision 需要 macOS 与命令行工具；RapidOCR 可在 Windows / macOS / Linux 使用，需先在运行服务的 Python 中执行 <code>pip install rapidocr onnxruntime</code>，它的每个数值格都需两次放大读数一致才采用。启动独立预览服务后即可识别：</p><code>python3 scripts/portfolio_snapshot_ocr_server.py</code><p>在本机浏览器打开 <a href="http://127.0.0.1:8798/portfolio_snapshot.html">截图 Portfolio</a>。需要 macOS 命令行工具；服务不可用时仍可手填持仓和导入 JSON。</p></details>
+                <div class="recognize-actions"><label class="zoom-label">识别引擎 <select id="ocr-engine" aria-label="识别引擎" disabled><option value="rapidocr" selected>RapidOCR（跨平台，默认）</option><option value="apple-vision">Apple Vision（macOS）</option><option value="local-codex">本机 Codex（云端多模态）</option></select></label><button id="recognize" class="primary" disabled>识别持仓 <span>↗</span></button><a id="open-ocr-page" class="primary-link" href="http://127.0.0.1:8798/portfolio_snapshot.html" target="_blank" rel="noopener" hidden>打开识别页面 ↗</a><button id="retry-service" hidden>重新连接识别服务</button><button id="cancel-ocr" hidden>取消识别</button><span id="recognize-note">点击识别后，仅交给本机 OCR 处理</span></div>
+                <details class="service-help"><summary>识别服务与启动说明</summary><p id="codex-status"></p><p>RapidOCR 与 Apple Vision 在本机离线运行，图片不会上传云端：Apple Vision 需要 macOS 与命令行工具；RapidOCR 可在 Windows / macOS / Linux 使用，需先在运行服务的 Python 中执行 <code>pip install rapidocr onnxruntime</code>，它的每个数值格都需两次放大读数一致才采用。本机 Codex 使用已安装 CLI 和现有 ChatGPT 登录，把图片发送至 OpenAI 云端模型，直接理解表格与组合关系；不依赖 OCR 表头校准。AI 结果仍须人工核验，没有精确行定位。取消只停止页面等待，已发出的模型请求可能继续，服务不会自动重试。启动独立预览服务后即可识别：</p><code>python3 scripts/portfolio_snapshot_ocr_server.py</code><p>在本机浏览器打开 <a href="http://127.0.0.1:8798/portfolio_snapshot.html">截图 Portfolio</a>。服务不可用时仍可手填持仓和导入 JSON。</p></details>
             </section>
             <div id="message" class="message" role="status" aria-live="polite" hidden></div>
             <section class="metadata" aria-label="快照信息">
@@ -62,18 +62,32 @@
                     </section>
                 </section>
             </div>
+            <section class="tws-panel panel" id="tws-panel" aria-labelledby="tws-title"><div class="panel-heading"><div><span class="eyebrow">TWS POSITIONS · READ-ONLY</span><h3 id="tws-title">与 TWS 持仓比对</h3></div><span class="muted">只读取 TWS 持仓快照，不修改截图 JSON、不下单</span></div>
+                <div class="tws-controls"><label>TWS 后端主机 <input id="tws-host" value="127.0.0.1" autocomplete="off" spellcheck="false" aria-label="TWS 后端主机"></label><label>端口 <input id="tws-port" value="8765" inputmode="numeric" maxlength="5" autocomplete="off" aria-label="TWS 后端端口"></label><label>账户 <select id="tws-account" aria-label="TWS 账户" disabled><option value="">连接后选择</option></select></label><button id="tws-compare" class="primary" type="button">与 TWS 持仓比对</button></div>
+                <p id="tws-status" class="tws-status" role="status" aria-live="polite">尚未比对。截图需是当前连接账户的最新持仓；系统不检查截图时间与账号。</p>
+                <div id="tws-stale" class="message structure-warning" role="status" hidden>截图 JSON 已变化，比对结果已过期，请重新比对。</div>
+                <div id="tws-summary" class="tws-summary" hidden></div>
+                <div id="tws-toolbar" class="table-toolbar" hidden><label for="tws-filter">筛选 <select id="tws-filter"><option value="issues">只看不一致与待处理</option><option value="all">全部</option></select></label><span>点击截图持仓可跳到逐字段核对</span></div>
+                <div id="tws-table-wrap" class="table-wrap tws-table-wrap" hidden><table id="tws-table"><thead><tr><th>结果</th><th>截图 JSON</th><th>TWS</th><th>差异与说明</th></tr></thead><tbody id="tws-body"></tbody></table></div>
+                <details id="tws-extra" class="tws-not-compared" hidden><summary id="tws-extra-summary">TWS 另有、截图未包含的持仓（参考，不影响结论）</summary><div id="tws-extra-body"></div></details>
+                <details id="tws-not-compared" class="tws-not-compared" hidden><summary>未参与比对的项目</summary><div id="tws-not-compared-body"></div></details>
+            </section>
             <section class="supplement panel"><div class="panel-heading"><div><span class="eyebrow">ADDITIONAL EVIDENCE</span><h3>现金、分组与原始识别</h3></div><span class="muted">辅助核验，不与持仓重复相加</span></div>
                 <div id="cash-rows" class="cash-rows"></div>
                 <details><summary id="source-summary">分组、组合与排除行（0）</summary><div id="source-rows" class="source-rows"></div></details>
                 <details><summary>原始识别全文与未归类行</summary><pre id="ocr-raw">尚未识别</pre></details>
             </section>
-            <section class="json-panel panel"><div class="panel-heading"><div><span class="eyebrow">IN-MEMORY SNAPSHOT</span><h3>Portfolio JSON</h3></div><div class="json-actions"><button id="import-json">导入 JSON</button><button id="copy-json">复制 JSON</button><input id="json-file" type="file" accept="application/json,.json" hidden></div></div><p class="muted">表格与 JSON 使用同一份内存数据。JSON 不包含原图文件；刷新页面会清空未导出的内容。</p><details id="json-details"><summary>展开当前 JSON</summary><pre id="json-preview"></pre></details></section>
+            <section class="json-panel panel"><div class="panel-heading"><div><span class="eyebrow">IN-MEMORY SNAPSHOT</span><h3>Portfolio JSON</h3></div><div class="json-actions"><button id="import-json-secondary" type="button">导入 JSON</button><button id="copy-json">复制 JSON</button><input id="json-file" type="file" accept="application/json,.json" hidden></div></div><p class="muted">导入后在上方持仓表逐项核验。JSON 不包含原图文件；请载入同一原图对照。导出与复制采用带缩进的可读格式。</p><details id="json-details"><summary>展开当前 JSON</summary><pre id="json-preview"></pre></details></section>
             <footer>截图识别是待核对的观察记录。未知字段保留为空，不从历史账本或默认值补齐。</footer>
         </main>
     </div>
-    <script src="js/portfolio_snapshot_schema.js?v=d1d33eb5ffd7"></script>
-    <script src="js/portfolio_snapshot_core.js?v=d1cb585a1ca2"></script>
-    <script src="js/portfolio_snapshot_ocr.js?v=53d40b81de86"></script>
-    <script src="js/portfolio_snapshot.js?v=00f51df96e46"></script>
+    <script src="js/portfolio_snapshot_schema.js?v=b84f2aeb54c7"></script>
+    <script src="js/portfolio_snapshot_core.js?v=75300e5c5391"></script>
+    <script src="js/portfolio_snapshot_ocr.js?v=66c5bd90f76a"></script>
+    <script src="js/portfolio_snapshot_codex.js?v=fce3676b9fc8"></script>
+    <script src="js/portfolio_snapshot_tws_model.js?v=299ac91280b7"></script>
+    <script src="js/portfolio_snapshot_tws.js?v=021541cfb08a"></script>
+    <script src="js/portfolio_snapshot.js?v=fff427decd88"></script>
+    <script src="js/portfolio_snapshot_tws_panel.js?v=5f385beb7d7e"></script>
 </body>
 </html>

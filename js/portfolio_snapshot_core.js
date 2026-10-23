@@ -5,6 +5,46 @@
         return { positionId: id, sourceRowIds: [rowId], instrument: S.instrument(), quantity: null,
             displayValues: {}, fieldEvidence: {}, issues: [], reviewStatus: 'unreviewed' };
     }
+    const blankReading = value => value == null || /^(?:\s*|[-—–]|N\/A)$/i.test(String(value).trim());
+    function fieldContext(p, path) {
+        const type = p.instrument.secType, option = ['OPT', 'FOP'].includes(type);
+        if ((type === 'STK' && ['instrument.expiryDate','instrument.right','instrument.strike','displayValues.displayIv','displayValues.theta'].includes(path))
+            || (type === 'FUT' && ['instrument.right','instrument.strike','displayValues.displayIv','displayValues.theta'].includes(path)))
+            return { required: false, note: type === 'STK' ? '股票 / ETF 不适用此字段' : '期货不适用此期权字段' };
+        const required = ['instrument.symbol','instrument.secType','quantity'].includes(path)
+            || (option && ['instrument.expiryDate','instrument.right','instrument.strike'].includes(path))
+            || (type === 'FUT' && path === 'instrument.expiryDate');
+        return { required, note: required ? '此持仓的必要字段，缺失时需核对' : '截图未提供时可留空，不作为可疑项' };
+    }
+    function equivalentReadings(path, first, second) {
+        const f = S.FIELDS.find(f => f.path === path);
+        if (!f || !['number','percent'].includes(f.kind)) return false;
+        try {
+            const a = S.fieldDecimal(first, f), b = S.fieldDecimal(second, f);
+            return a !== null && a === b;
+        } catch (_) { return false; }
+    }
+    function localCheck(p, path) {
+        const e = p.fieldEvidence[path];
+        // Old JSON keeps historical statuses and both raw readings. Re-evaluate
+        // representation-only differences without changing any stored value.
+        if (e?.localReread && equivalentReadings(path, e.raw, e.localReread.raw)
+            && equivalentReadings(path, S.get(p, path), e.raw)) return 'agreed';
+        return e?.localCheck;
+    }
+    function fieldProblem(p, path) {
+        const e = p.fieldEvidence[path];
+        if (!e?.problem || e.source === 'manual') return null;
+        const value = S.get(p, path);
+        if (value !== null && equivalentReadings(path, e.raw, value) && S.priceTypography(e.raw, path) !== e.raw
+            && e.cellCheck !== 'unchecked') return null;
+        if (value !== null && !(e.cellCheck === 'unchecked' && e.source === 'ocr')) return null;
+        // Missing optional cells are routine. Actual unreadable ink, competing
+        // readings and nonblank invalid strings remain reviewable.
+        if (blankReading(e.raw) && !e.conflictingReadings && !['reread_conflict','unresolved'].includes(e.cellCheck)
+            && !/字形|两次放大|未收到局部复核答复|像素/.test(e.problem)) return null;
+        return e.problem;
+    }
     function issues(p) {
         const out = [...(p.issues || [])];
         if (!p.instrument.symbol) out.push('标的未确认');
@@ -12,11 +52,15 @@
         if (p.quantity === null) out.push('持仓数量缺失或无法读取');
         if (p.instrument.secType === 'STK' && (p.instrument.right || p.instrument.strike !== null || p.instrument.expiryDate)) out.push('股票类型与期权/到期字段矛盾，请人工确认');
         if (p.instrument.secType === 'FUT' && (p.instrument.right || p.instrument.strike !== null)) out.push('期货类型与期权字段矛盾，请人工确认');
+        if (p.instrument.secType === 'FUT' && !p.instrument.expiryDate) out.push('期货到期日未确认');
         for (const change of machineChanges({ positions: [p] })) out.push('机器重读/推断：' + change.label + ' ' + (change.before ?? '未读出') + ' → ' + (change.after ?? '未知') + '（需留意，确认后保留）');
         if (p.instrument.secType === 'STK' && p.quantity !== null && p.displayValues.mark != null && p.displayValues.marketValue != null) {
             const places = (path, value) => {
-                const e = p.fieldEvidence[path], raw = e?.source === 'ocr' && typeof e.raw === 'string' ? e.raw.trim() : value;
-                return raw.split('.')[1]?.length || 0;
+                const e = p.fieldEvidence[path], raw = ['ocr','ai'].includes(e?.source) && typeof e.raw === 'string' ? e.raw.trim() : value;
+                try {
+                    const normalized = S.priceTypography(raw, path).replace(/[•·,%()\s]/g, '');
+                    return normalized.split('.')[1]?.length || 0;
+                } catch (_) { return value.split('.')[1]?.length || 0; }
             };
             const mark = p.displayValues.mark, decimals = places('displayValues.mark', mark);
             const expected = Number(p.quantity) * Number(mark), actual = Number(p.displayValues.marketValue);
@@ -31,15 +75,24 @@
             if (p.instrument.strike === null) out.push('行权价未确认');
         }
         for (const [path, e] of Object.entries(p.fieldEvidence)) {
+            if (e.source === 'ai' && localCheck(p, path) === 'conflict') out.push((S.FIELDS.find(f => f.path === path)?.label || path)
+                + ' 整图 / 局部冲突：' + (e.raw ?? '未读出') + ' / ' + (e.localReread?.raw ?? '未读出') + '；未自动覆盖，请人工核验。');
             // An unchecked first reading keeps its value but stays flagged until edited by hand.
-            if (e.problem && (S.get(p, path) === null || e.cellCheck === 'unchecked' && e.source === 'ocr')) out.push(e.problem);
+            const problem = fieldProblem(p, path);
+            if (problem) out.push(problem);
         }
         return [...new Set(out)];
     }
     function machineChanges(snapshot) {
         const paths = S.FIELDS.map(f=>f.path);
         return [...snapshot.positions.flatMap((p, index) => paths.filter(path => {
-            const e = p.fieldEvidence[path]; return e && ((e.corrections || []).length || e.interpretation);
+            const e = p.fieldEvidence[path];
+            if (!e || !((e.corrections || []).length || e.interpretation)) return false;
+            const before = e.interpretation?.token ?? e.raw ?? e.originalValue;
+            // Formatting is evidence, not a changed price requiring a separate
+            // acknowledgement. Real corrections (including signs) stay here.
+            if (S.priceTypography(before, path) !== before && equivalentReadings(path, before, S.get(p, path))) return false;
+            return true;
         }).map(path => ({ positionId: p.positionId, row: index + 1, field: path, label: S.FIELDS.find(f => f.path === path).label,
             before: p.fieldEvidence[path].interpretation ? p.fieldEvidence[path].interpretation.token : p.fieldEvidence[path].originalValue,
             after: S.get(p, path), source: p.fieldEvidence[path].source }))),
@@ -57,9 +110,19 @@
         return JSON.stringify({ issue, runId: snapshot.recognition.runId || null, combo: row?.combo || null });
     }
     function pendingIssues(snapshot) {
-        const all = [...(snapshot.recognition.structureIssues || []), ...snapshot.sourceRows.filter(r => r.rowType === 'combo_summary' && !r.combo)
+        const all = [...(snapshot.recognition.structureIssues || []), ...(snapshot.recognition.localReviewIssues || []), ...snapshot.sourceRows.filter(r => r.rowType === 'combo_summary' && !r.combo)
             .map(r => ({ rowId: r.rowId, code: 'legacy_combo', message: '旧组合缺少层级证据，请重新识别或明确接受其不完整性。' }))];
-        return all.filter(issue => !(snapshot.review.structureDecisions || []).some(d => d.evidence === issueEvidence(snapshot, issue)));
+        return all.filter(issue => {
+            // Editing a conflicting field is an explicit human choice; retain
+            // both machine readings, but do not keep its old decision pending.
+            if (issue.code === 'ai_local_conflict' && issue.field) {
+                const p = snapshot.positions.find(p => p.sourceRowIds.includes(issue.rowId));
+                if (p?.fieldEvidence[issue.field]?.source === 'manual') return false;
+                if (p && localCheck(p, issue.field) === 'agreed') return false;
+                if (issue.field === 'cash.amount' && (snapshot.review.changes || []).some(c => c.sourceRowId === issue.rowId && c.field === 'cash.amount')) return false;
+            }
+            return !(snapshot.review.structureDecisions || []).some(d => d.evidence === issueEvidence(snapshot, issue));
+        });
     }
     function acceptIssue(snapshot, issue, reason, now) {
         if (!reason || reason.trim().length < 2) throw new Error('请填写核对结论或接受不完整的原因');
@@ -161,5 +224,5 @@
             summaries: snapshot.sourceRows.filter(r => ['group_summary','combo_summary'].includes(r.rowType)).length,
             decorations: snapshot.sourceRows.filter(r => r.rowType === 'decoration').length };
     }
-    g.OptionComboPortfolioSnapshotCore = Object.freeze({ position, issues, cashIssues, edit, confirm, confirmAll, reviewStatus, applyRecognition, add, stats, machineChanges, pendingIssues, acceptIssue, excludeRow });
+    g.OptionComboPortfolioSnapshotCore = Object.freeze({ position, blankReading, fieldContext, fieldProblem, localCheck, issues, cashIssues, edit, confirm, confirmAll, reviewStatus, applyRecognition, add, stats, machineChanges, pendingIssues, acceptIssue, excludeRow });
 })(typeof globalThis !== 'undefined' ? globalThis : this);

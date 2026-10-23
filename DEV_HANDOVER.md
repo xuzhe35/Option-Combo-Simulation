@@ -6,8 +6,10 @@
 
 Screenshot Portfolio P0/P1: `portfolio_snapshot.html` is an independent memory-only
 review page; the optional loopback OCR service is
-`python3 scripts/portfolio_snapshot_ocr_server.py` (8798, macOS Vision + swiftc).
-No trading/backend/database integration. The ledger entry is relative so a
+`python3 scripts/portfolio_snapshot_ocr_server.py` (8798, offline Vision/RapidOCR or explicit cloud-via-Codex).
+No trading or database integration; besides OCR, the only backend contact is the
+opt-in read-only TWS position comparison (three snapshot reads from `ib_server.py`,
+`CODE PLAN/PORTFOLIO_SNAPSHOT_TWS_CROSSCHECK_PLAN.md`). The ledger entry is relative so a
 static page still works when OCR is unavailable.
 
 Current audit remediation is in `CODE PLAN/PORTFOLIO_SCREENSHOT_OCR_VALIDATION.md`
@@ -76,6 +78,51 @@ Persistence and ledger modules, mounted by BOTH backends:
 - `portfolio_store.py` / `portfolio_store_ws.py` for the SQLite workspace store
 - `portfolio_maintenance.py`, `portfolio_archive.py`, `portfolio_admin_ws.py` for the archive layer and its admin protocol
 - `cost_basis_store.py` / `cost_basis_ws.py` for the blended-cost ledger
+
+Codex screenshot engine (2026-10-22): the existing selector also offers
+`local-codex` / protocol 3 via `scripts/portfolio_snapshot_codex.py` and
+`js/portfolio_snapshot_codex.js`. It uses the installed CLI's ChatGPT login,
+not an API key; pictures go to OpenAI's model. RapidOCR remains the default;
+there is no automatic cloud fallback. Independent semantic rows bypass OCR
+header calibration but retain strict schema/identity/graph checks and manual
+review; the whole-image phase has no measured row/cell coordinates. See validation §§24–25 for
+synthetic tests and the authorized four-source real-image comparison. Codex has
+wider table coverage in that campaign but wrong numerical/contract values,
+including a lost quantity sign; retain manual review and the offline default.
+The authorization covers only the four listed images and their test variants.
+Validation §26 diagnosed the old exec path's lost high effort and implicit
+1632px image resize. The current adapter uses the isolated stdio app-server
+transport in `scripts/portfolio_snapshot_codex_transport.py`, explicitly pins
+high/original, checks actual session settings and the source data-URL echo, and
+retains provenance in the Portfolio. Native wire tests use an unauthenticated
+local mock receiver to verify the actual decoded original bytes and dimensions.
+Read §27 for the controlled comparison; do not treat transport success as a
+claim that every number is right. All four high/original requests retained source
+bytes/dimensions; 955/957 known holding fields matched, with one wrong strike and
+one wrong Delta amount. The low/scaled and high/scaled controls matched 957/957
+and 956/957, so this run does not establish an accuracy improvement. Keep the
+explicit high/original settings requested by the user and strict adoption guards.
+The file-backed ChatGPT login is referenced,
+not copied into model context; no API key or user MCP/config is inherited.
+The current page then requires a second, blind local-row phase through
+`scripts/portfolio_snapshot_codex_review.py`. It sends no first-pass values,
+checks every original-pixel crop/echo and the complete row-role sequence, and
+retains both readings without overwriting. `recognition.localReviewIssues`
+remains pending until a human edits the field or explicitly accepts the batch
+list. Never put these field conflicts into combo structure counts or hide them
+by choosing the reading closer to a golden. Wrong model/run/proof on either
+reply preserves the previous table. Each phase retains its 240/255-second
+service/page budget. See validation §28 for four-source local-review evidence.
+The four-source run flagged both historical strike/Delta errors and 6/6 current
+first-read errors, but also 52 correct-first fields (51 Unicode superscript
+strings rejected as numeric values, one wrong local cost amount). First values
+remained 951/957 correct; local suggestions were 902/957, never adopted. Keep
+this noise visible. Display-only row context/navigation and a collapsed issue
+list were added after inference froze; four final controller replays retained
+identical Portfolio data and evidence. Tests: 105 frontend, 44 Python.
+Restart only the
+isolated screenshot service to load backend changes; never restart the broker
+for this feature. Preserve browser drafts when opening the updated page.
 
 ## 2. What Is Actually Implemented
 

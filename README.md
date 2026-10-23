@@ -12,7 +12,7 @@ The repo has these frontend surfaces:
 4. `cost_basis.html` - standalone per-account, per-underlying blended-cost ledger
    - `cost_basis_fop.html` - the standalone FOP ledger (CL futures and options on futures)
 5. `workspace_db_admin.html` - standalone workspace-database and archive admin page
-6. `portfolio_snapshot.html` - screenshot Portfolio with image drop, offline OCR, side-by-side review and in-memory JSON
+6. `portfolio_snapshot.html` - screenshot Portfolio with image drop, offline OCR / Codex multimodal, side-by-side review and in-memory JSON
 
 It also has two optional Python WebSocket backends:
 
@@ -30,12 +30,40 @@ Click a field to scroll its enlarged source crop to the relevant column. Use
 **全部识别列** to inspect the financial columns. After visually checking the image,
 use **批量确认全部** for all positions and cash, including filtered-out rows;
 individual confirmation remains available. Editing reopens the changed row.
+For a Codex chat-generated Portfolio JSON, drag the JSON onto the page (or use
+**导入 JSON** in the top-right corner), then drag its matching image; no recognition request is needed. Click
+each position to inspect its fields and original AI readings. JSON preview,
+copy and export use readable indentation; export uses the image's basename.
+The experimental `tws-screenshot-json` Skill saves its result beside the source
+image with the same basename and a `.json` extension, preserving existing files.
 Machine-filled or inferred fields are listed once before batch
 confirmation, including the first value and adopted value. Their markers stay
 visible after confirmation. Incomplete structures can be explicitly accepted
 with a reason; mistaken rows can be excluded while retaining the source.
 Account and screenshot date are manual inputs; expiration
 groups and notifications never supply them.
+
+**与 TWS 持仓比对** (read-only) compares the loaded JSON with the live positions of the
+TWS account it came from. You make sure the screenshot is the account's current
+holdings; the page does not check the screenshot time or account. Start `ib_server.py`,
+open the panel below the review table, keep host `127.0.0.1` / port `8765` or enter a
+remote `ib_server.py` (same `ws://host:port` as the cost ledger), and click the button.
+This page has its own connection and does not read the ledger's saved server; it
+remembers, in this browser only, the last host and port whose backend answered. The page reads only the managed accounts, the position
+snapshot and the avg-cost snapshot (its client refuses any other action), picks the
+JSON's account or TWS's default, and matches atomic positions by contract identity:
+matched, presumed (one identity field missing or different and only one candidate),
+ambiguous, duplicated in the JSON, or only in the JSON. Quantity, multiplier, trading
+class and AVG PRICE (TWS shows the average rounded up for longs and down for shorts,
+so the screenshot may differ by up to one shown unit in that direction) are compared; MARK
+and unrealized P&L are shown for reference only. The screenshot need not show the whole
+account: the verdict only asks that every position in the screenshot is supported by
+TWS. Positions only TWS holds are listed separately for reference and never affect it.
+Combo parents, cash and unclassified rows are listed but not compared. Nothing in the
+JSON changes.
+Click a row to review that position. The result stays in the page; no file is written. The historical backend
+has no TWS positions. Plan and record:
+`CODE PLAN/PORTFOLIO_SNAPSHOT_TWS_CROSSCHECK_PLAN.md` and `..._VALIDATION.md`.
 
 For real offline recognition on macOS, start the isolated service:
 
@@ -48,13 +76,88 @@ Opening the HTML directly as `file://` cannot connect to OCR; that page offers
 **打开识别页面** in a new tab. Reattach the image there; export any existing edits
 to JSON first. If the service starts after an HTTP page is opened, use
 **重新连接识别服务**; the loaded image and edits stay in memory.
-The service requires Apple's installed command-line tools (`swiftc`) and uses
-on-device Vision. First recognition compiles a temporary helper; later calls
-reuse it. No API key, cloud upload, broker connection or business database is
-involved. On other platforms the memory table/JSON editor works, while this
-preview's OCR adapter reports unavailable. Windows OCR is not implemented yet.
+RapidOCR (cross-platform, `pip install rapidocr onnxruntime`) and Apple Vision
+(macOS + `swiftc`) process images offline. RapidOCR remains the default.
+**本机 Codex（云端多模态）** is a third, explicit engine selection. It uses the
+installed Codex CLI and existing **ChatGPT login**, sends the selected image to
+OpenAI's model, and understands the table directly; it does not require the
+OCR header calibrator. It is not offline. It never activates as an automatic
+fallback from an unavailable offline engine.
 
-Two explicit TWS presentations are supported: the existing 12-column FIN
+The independent adapter is `scripts/portfolio_snapshot_codex.py`; its browser
+normalizer is `js/portfolio_snapshot_codex.js` (protocol 3). The server's Python
+needs Pillow (`pip install pillow`), and `codex login status` must report a
+ChatGPT login. Put `codex` on the server's PATH, or set `PORTFOLIO_CODEX_CLI` to
+the installed executable. It uses the model selected in the local Codex config;
+`PORTFOLIO_CODEX_MODEL` can explicitly override that choice. It does not use an
+API key or inherit project instructions, plugins, MCP connections or old chats.
+Extraction now uses the CLI's isolated stdio app-server with **high** reasoning
+and **original** image input, rather than `exec --image` (which resizes files).
+A temporary configuration uses the installed CLI's model metadata and references
+its existing file-backed ChatGPT login; credentials never enter prompts or argv.
+If this login reference cannot be created, the engine refuses the run.
+The session is ephemeral and read-only, with a fixed JSON schema. Actual
+session settings and the exact original data URL must be echoed consistently;
+missing/downgraded settings, warnings, tools and malformed replies refuse adoption.
+The Portfolio JSON retains the model, effort, original dimensions and image hash.
+No automatic retry is made.
+
+AI readings are visibly marked, all start unreviewed, unknowns stay null and
+combo parents are excluded from positions. Original AI cell strings remain
+beside editable values. The whole-image read has no coordinates; the local
+phase below can add measured full-width text bands, never calibrated cell proof.
+Inspect the original image with zoom.
+Codex now performs a whole-image read followed by a blind local-row read in a
+fresh isolated session. `scripts/portfolio_snapshot_codex_review.py` measures
+neutral text bands using Pillow, crops the original pixels without resizing,
+and supplies the original image for header context. No first-pass values or
+goldens are sent to the second session. Each crop has its own hash, rectangle
+and input-echo proof. All crop IDs/order and the complete table row-type sequence
+must match before the browser associates any readings; ambiguity stays visible.
+The first values are never replaced, even when the local value looks better.
+The field editor retains both raw strings and shows disagreements; the selected
+row can display the measured full-width crop, without claiming calibrated cells.
+Batch confirmation lists unresolved local conflicts once and records the user's
+explicit choice to retain current values. Manual edits keep both readings.
+Wrong engine/model/protocol/image/run/crop evidence aborts adoption; a valid but
+unalignable read keeps the first candidate with a pending review warning.
+The local detector supports up to 64 text bands; it refuses excess/empty coverage
+instead of silently skipping rows. No OCR calibration check has been relaxed.
+See validation §28 for the local-review experiment and its limitations.
+In that four-image experiment, both target strike/Delta errors and all six new
+first-pass errors were flagged. There were also 52 extra flags, mostly from
+superscript-number strings rejected by the unchanged parser, plus one newly
+wrong local amount. Local readings therefore cannot be treated as automatic
+corrections. The page keeps the first values and shows a collapsible review list
+with row context/navigation, both readings and format explanations.
+
+Review warnings distinguish required contract terms from routine blanks:
+stocks / ETFs need no expiry, Call/Put, strike, IV or theta; futures need an
+expiry but no option terms. Missing screenshot metadata and optional display
+values remain null without a warning. TWS small raised price-tail digits such
+as `12.34⁴` mean `12.344` in MARK, AVG PRICE and LAST; equivalent transcriptions
+do not require a separate acknowledgement. Raw strings remain available, and
+actual number/sign conflicts, unreadable ink, incomplete option identities and
+combination structure problems still require review. Imported JSON values and
+evidence are preserved while its warnings use the current rules. Validation §29
+records an offline replay of the four archived reply pairs, with no new cloud calls.
+
+Codex has a 240-second process budget and a 255-second page budget **per phase**.
+Two model calls make this slower than the earlier single-image version. Cancel stops
+the page waiting; an already submitted model request may continue until its
+budget expires. No broker connection or business database is involved.
+See validation §§24–27 for the earlier comparison, its parameter/image diagnosis,
+and the controlled high/original verification.
+The earlier exec campaign (§25) produced more candidate tables, but also misread
+numerical and contract fields (including a quantity sign, strike digits and a LAST
+qualifier); it was not an accuracy upgrade over Apple Vision in that campaign.
+In the new four-original controlled comparison (§27), explicit high/original
+matched 955/957 visible holding fields and all 303 expected nulls, with one wrong
+strike and one wrong Delta amount. The low/scaled and high/scaled controls matched
+957/957 and 956/957 respectively. This small, single-call comparison does not show
+an accuracy benefit from high or original; manual review remains necessary.
+
+For the offline OCR engines, two explicit TWS presentations are supported: the existing 12-column FIN
 INSTRUMENT / PTF THETA layout including IV, and the expanded FINANCIAL
 INSTRUMENT / PORTF THETA presentation ending at LAST without IV. The expanded
 presentation can also include IV. Every label required by the selected

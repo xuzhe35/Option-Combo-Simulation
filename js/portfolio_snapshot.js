@@ -2,13 +2,18 @@
     'use strict';
     if (typeof document === 'undefined') return;
     const S = g.OptionComboPortfolioSnapshotSchema, C = g.OptionComboPortfolioSnapshotCore, O = g.OptionComboPortfolioSnapshotOcr;
+    const OCR_PROTOCOLS = Object.freeze({ 'apple-vision': 1, rapidocr: 2, 'local-codex': 3 });
+    const normalizeRecognition = (reply, sourceId) => reply.engine === 'local-codex'
+        ? g.OptionComboPortfolioSnapshotCodex.normalize(reply, sourceId) : O.normalize(reply, sourceId);
     const $ = id => document.getElementById(id), now = () => new Date().toISOString();
     const uid = () => g.crypto?.randomUUID?.() || 'snapshot-' + Date.now() + '-' + Math.random().toString(36).slice(2);
     let portfolioSnapshotState = S.empty(uid(), now());
     let sourceFile = null, sourceUrl = null, selectedId = null, selectedSourceId = null, generation = 0, controller = null;
     let dirty = false, busy = false, available = false, metadataInvalid = false, imageLoadGeneration = 0;
     const fileMode = location.protocol === 'file:';
-    let serviceCheck = null, checkingService = false, engines = {};
+    let serviceCheck = null, checkingService = false, engines = {}, engineStatus = {};
+    // Read-only observers of the in-memory JSON (the TWS comparison panel); they never change it.
+    const changeListeners = new Set();
     const endpoints = [...new Set([...(location.protocol.startsWith('http') ? [location.origin] : []), 'http://127.0.0.1:8798'])];
     let endpoint = endpoints[0];
     function node(tag, text, cls) {
@@ -34,8 +39,13 @@
             i.strike, i.right === 'C' ? 'CALL' : i.right === 'P' ? 'PUT' : null].filter(Boolean).join(' ');
     }
     function renderJson() {
-        if ($('json-details').open) { try { $('json-preview').textContent = S.serialize(portfolioSnapshotState); } catch (e) { $('json-preview').textContent = e.message; } }
+        if ($('json-details').open) { try { $('json-preview').textContent = readableJson(portfolioSnapshotState); } catch (e) { $('json-preview').textContent = e.message; } }
         $('export-json').disabled = metadataInvalid || !!document.querySelector('[aria-invalid="true"]') || (!portfolioSnapshotState.sources.length && !portfolioSnapshotState.positions.length);
+    }
+    function readableJson(snapshot) {
+        const text = JSON.stringify(JSON.parse(S.serialize(snapshot)), null, 2) + '\n';
+        if (new Blob([text]).size > S.LIMITS.jsonBytes) throw new Error('带缩进的 JSON 超过 32 MiB 可导入上限，尚未导出。');
+        return text;
     }
     function renderTable() {
         const stats = C.stats(portfolioSnapshotState), filter = $('row-filter').value;
@@ -48,7 +58,10 @@
         $('review-progress').textContent = stats.reviewed + ' / ' + stats.positions + ' 已核对';
         const structures = C.pendingIssues(portfolioSnapshotState);
         $('structure-warning').hidden = !structures.length;
-        $('structure-warning').textContent = structures.map(s => s.message).join(' ');
+        const localIssue = s => typeof s.code === 'string' && s.code.startsWith('ai_local_');
+        const localCount = structures.filter(localIssue).length;
+        $('structure-warning').textContent = structures.filter(s => !localIssue(s)).map(s => s.message).join(' ')
+            + (localCount ? ' 整图与局部有 ' + localCount + ' 项待核验，主表未自动改值；可展开清单定位原图，或在批量确认时集中核验。' : '');
         const body = $('positions-body'); body.replaceChildren();
         const extra = $('table-columns').value === 'all' ? S.FIELDS.filter(f => f.path.startsWith('displayValues.') && !['displayValues.mark', 'displayValues.displayIv'].includes(f.path)) : [];
         const head = $('positions-table').querySelector('thead tr');
@@ -67,6 +80,11 @@
             state.append(node('span', reviewed ? '✓ 已核对' : '待核对', 'row-state' + (reviewed ? ' reviewed' : '')));
             const contract = node('td', undefined, 'contract-cell');
             contract.append(node('strong', displayTitle(p)), node('small', sourceRow(p)?.rawCells?.description || '手工添加'));
+            if (sourceRow(p)?.aiEvidence) contract.append(node('span', 'AI 多模态读取', 'reread-badge'));
+            if (sourceRow(p)?.aiEvidence?.localCropId) {
+                const conflicts = Object.keys(p.fieldEvidence).filter(path => C.localCheck(p, path) === 'conflict').length;
+                contract.append(node('span', conflicts ? '两次读数有 ' + conflicts + ' 处不同' : '局部读取已完成', conflicts ? 'problem-count' : 'reread-badge'));
+            }
             if (sourceRow(p)?.ocrRefinements?.some(r => r.status === 'agreed')) contract.append(node('span', '2× / 3× 局部重读', 'reread-badge'));
             if (sourceRow(p)?.quantityRefinement) contract.append(node('span', '数量局部重读', 'reread-badge'));
             if (sourceRow(p)?.rowRefinement) contract.append(node('span', '合约行已局部复核', 'reread-badge'));
@@ -95,6 +113,7 @@
             const tr = node('tr'), td = node('td', '当前筛选没有持仓'); td.colSpan = 6 + extra.length; tr.append(td); body.append(tr);
         }
         renderJson();
+        for (const listener of changeListeners) listener();
     }
     function renderEvidence() {
         renderStructureActions();
@@ -108,7 +127,7 @@
             const locate = node('button', '查看原图'); locate.onclick = () => selectSource(r.rowId); el.append(locate);
             if (r.combo) {
                 const count = r.combo.atomicLegRowIds.length;
-                el.append(node('p', r.combo.status === 'expanded_visible' ? '按缩进识别到 ' + count + ' 条可见原子腿；不推定组合的总腿数。'
+                el.append(node('p', r.combo.status === 'expanded_visible' ? (r.aiEvidence ? 'AI 按表格层级识别到 ' : '按缩进识别到 ') + count + ' 条可见原子腿；不推定组合的总腿数。'
                     : r.combo.status === 'collapsed' ? '没有可见子腿；请展开组合再识别，不猜测腿数或数量。' : '仅见部分腿或有未分类子行，请核对完整性。', 'combo-status'));
                 if (portfolioSnapshotState.sourceRows.some(child => child.parentRowId === r.rowId
                     && ['aligned_crop_ink_geometry','aligned_row_crop_ink_geometry'].includes(child.hierarchyEvidence?.indentMeasurement?.method))) {
@@ -146,6 +165,8 @@
             });
             label.append(input); review.append(check, document.createTextNode(' 已核对现金'));
             line.append(label, node('small', '原文：' + (cash.raw ?? '未读出')), review);
+            if (cash.localReread) line.append(node('small', '局部原文：' + (cash.localReread.raw ?? '未读出')
+                + (cash.localCheck === 'conflict' ? ' · 两次冲突，未自动覆盖' : ' · 两次读数一致，仍需人工核验')));
             for (const text of C.cashIssues(cash)) line.append(node('span', text, 'cash-problem'));
             cashEl.append(line);
         }
@@ -153,6 +174,7 @@
         $('ocr-raw').textContent = rec.originalLines ? rec.originalLines.map(l => l.text).join('\n')
             + '\n\n局部重读：\n' + JSON.stringify(rec.refinements || [], null, 2)
             + '\n\n未归类行：\n' + (rec.unmatchedRows || []).map(r => r.rawText).join('\n') : '尚未识别';
+        if (rec.localReview) $('ocr-raw').textContent += '\n\n独立局部复核（不覆盖首轮值）：\n' + JSON.stringify(rec.localReview, null, 2);
     }
     function renderEditor() {
         const p = portfolioSnapshotState.positions.find(p => p.positionId === selectedId);
@@ -165,6 +187,7 @@
         const editor = $('field-editor'); editor.replaceChildren();
         for (const f of S.FIELDS) {
             const evidence = p.fieldEvidence[f.path], value = S.get(p, f.path);
+            const context = C.fieldContext(p, f.path), check = C.localCheck(p, f.path);
             const label = node('label', f.label, evidence?.source === 'manual' ? 'edited' : '');
             let input;
             if (f.kind === 'type' || f.kind === 'right') {
@@ -174,7 +197,7 @@
             } else {
                 input = node('input'); input.type = f.kind === 'date' ? 'date' : 'text';
                 if (['number', 'percent'].includes(f.kind)) input.inputMode = 'decimal';
-                input.placeholder = '未知 / 原图不可读';
+                input.placeholder = context.required ? '待确认 / 原图不可读' : context.note;
             }
             input.value = f.kind === 'percent' && value !== null ? S.percentDisplay(value) : value ?? '';
             input.dataset.field = f.path;
@@ -194,7 +217,21 @@
                     renderTable(); renderEditor();
                 } catch (e) { input.setAttribute('aria-invalid', 'true'); message(e.message, true); renderJson(); }
             });
-            label.append(input, node('small', 'OCR 原文：' + (evidence?.raw ?? '未读出 / 未提供')));
+            label.append(input, node('small', (evidence?.source === 'ai' ? 'AI 读取原文：' : 'OCR 原文：') + (evidence?.raw ?? '未读出 / 未提供')));
+            if (value === null) label.append(node('small', context.note));
+            if (evidence?.raw && S.priceTypography(evidence.raw, f.path) !== evidence.raw)
+                label.append(node('small', '小号尾数按连续小数读取，属于正常价格显示格式。', 'reread-note'));
+            if (evidence?.interpretation?.method === 'chat_visual_typography') label.append(node('small',
+                '视觉解读：' + evidence.interpretation.token + ' → ' + evidence.interpretation.value + '；' + evidence.interpretation.reason, 'reread-note'));
+            for (const check of evidence?.visualChecks || []) label.append(node('small',
+                '对话复看：' + (check.raw ?? '未知') + ' · ' + (check.conflict ? '与首读冲突，未覆盖' : '复看记录') + '；' + check.reason,
+                check.conflict ? 'cash-problem' : 'reread-note'));
+            if (evidence?.localReread) label.append(node('small', '局部读取原文：' + (evidence.localReread.raw ?? '未读出 / 未提供')
+                + ' · ' + (check === 'conflict' ? (evidence.source === 'manual' ? '历史冲突，已人工修改' : '两次冲突，未自动覆盖')
+                    : check === 'unavailable' ? '未形成有效复核' : check === 'agreed_unknown' ? '两次均为空；' + context.note : '两次读数一致，仍需人工核验'),
+                check === 'conflict' ? 'cash-problem' : 'reread-note'));
+            if (evidence?.localReread?.problem && !['agreed','agreed_unknown'].includes(check))
+                label.append(node('small', '局部解析说明：' + evidence.localReread.problem, 'cash-problem'));
             if(evidence?.availability==='column_not_present')label.append(node('small','原图没有此列，保留未知；不会从其他列补值。'));
             if (evidence?.corrections?.length) label.append(node('small', (evidence.corrections[0].method === 'quantity_crop_consensus'
                 ? '首次未读出 → 数量单元格 3× / 4× 重读一致：' : '首次值 ' + (evidence.originalValue ?? '未确认') + ' → 两种放大重读一致：')
@@ -247,6 +284,11 @@
         $('image-info').textContent = '尚未载入图片';
         renderRecognitionControls();
     }
+    async function loadFile(file) {
+        if (!file) return;
+        if (/\.json$/i.test(file.name || '') || ['application/json', 'text/json'].includes(file.type)) return importJson(file);
+        return loadImage(file);
+    }
     async function loadImage(file) {
         if (!file) return;
         const loadGeneration = ++imageLoadGeneration;
@@ -275,7 +317,7 @@
         $('source-image').src = sourceUrl; $('source-image').hidden = false; $('image-empty').hidden = true;
         $('source-image').onload = () => highlight(false);
         $('upload-title').textContent = file.name;
-        $('upload-caption').textContent = width + ' × ' + height + ' px · ' + (file.size / 1024 / 1024).toFixed(2) + ' MiB · 可拖入替换';
+        $('upload-caption').textContent = width + ' × ' + height + ' px · ' + (file.size / 1024 / 1024).toFixed(2) + ' MiB · 可继续拖入图片或 JSON';
         $('image-info').textContent = width + ' × ' + height + ' px';
         renderRecognitionControls();
         dirty = true; renderTable(); renderEditor(); renderEvidence();
@@ -304,15 +346,30 @@
             cancel.onclick = () => dialog.close('cancel'); adopt.onclick = () => dialog.close('adopt'); dialog.showModal();
         });
     }
+    function checkRecognitionReply(reply, expected, stage) {
+        let problem = null;
+        const protocol = OCR_PROTOCOLS[expected.engine];
+        if (!Number.isInteger(protocol) || !reply || typeof reply !== 'object' || Array.isArray(reply)
+            || reply.engine !== expected.engine || reply.reviewProtocol !== protocol) problem = '识别引擎或协议与本次选择不一致';
+        else if (reply.sourceHash !== expected.sha256) problem = '回复与本次图片不一致';
+        else if (reply.width !== expected.width || reply.height !== expected.height) problem = '回复与本次图片尺寸不一致';
+        if (problem) {
+            const error = new Error(stage + '回复校验失败：' + problem + '，本次结果未采用，当前表格已保留。');
+            error.code = 'ocr_reply_mismatch';
+            throw error;
+        }
+    }
     async function recognize() {
-        if (!sourceFile || busy || !available || fileMode) return;
+        if (!sourceFile || busy || !available || !engines[$('ocr-engine').value] || fileMode) return;
         stopRecognition(); busy = true; const current = generation, hash = portfolioSnapshotState.sources[0].sha256;
         renderBulkConfirmation();
         controller = new AbortController(); const requestController = controller;
         $('recognize').disabled = true; $('recognize').textContent = '正在读取图片…'; $('cancel-ocr').hidden = false;
-        $('recognize-note').textContent = '本机离线处理中；首次启动可能需要约一分钟'; message('正在识别文字、持仓行和数字，请稍候。');
-        const timeout = setTimeout(() => requestController.abort(), 115000);
         const engine = $('ocr-engine').value;
+        $('recognize-note').textContent = engine === 'local-codex' ? '整图与独立局部复核分别调用云端模型，可能需要数分钟；不会自动重试' : '本机离线处理中；首次启动可能需要约一分钟';
+        message(engine === 'local-codex' ? '正在通过本机 Codex 读取表格结构与持仓，请稍候。' : '正在识别文字、持仓行和数字，请稍候。');
+        let timeout = setTimeout(() => requestController.abort(), engine === 'local-codex' ? 255000 : 115000);
+        const expected = { engine, sha256: hash, width: portfolioSnapshotState.sources[0].width, height: portfolioSnapshotState.sources[0].height };
         try {
             const bytes = new Uint8Array(await sourceFile.arrayBuffer());
             if (current !== generation) return;
@@ -322,9 +379,22 @@
             const result = await response.json();
             if (current !== generation) return;
             if (!response.ok) throw new Error(result.message || '本机识别失败');
-            if (result.sourceHash !== hash) throw new Error('识别回复与当前图片不一致，已丢弃。');
-            if (result.width !== portfolioSnapshotState.sources[0].width || result.height !== portfolioSnapshotState.sources[0].height) throw new Error('图片方向或尺寸不一致，请重新导出图片后识别。');
-            let candidate = O.normalize(result, 'image-1');
+            checkRecognitionReply(result, expected, '首轮');
+            let candidate = normalizeRecognition(result, 'image-1');
+            if (engine === 'local-codex') {
+                $('recognize').textContent = '正在局部复核…';
+                message('整图读取完成，正在独立裁剪复核合约身份与数字；两次读数都会保留，冲突不会自动覆盖。');
+                clearTimeout(timeout); timeout = setTimeout(() => requestController.abort(), 255000);
+                const rereadResponse = await fetch(endpoint + '/api/recognize', { method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Portfolio-Preview': '1' },
+                    body: JSON.stringify({ image: btoa(binary), engine, codexReview: { firstRunId: result.runId } }),
+                    signal: requestController.signal });
+                const reread = await rereadResponse.json();
+                if (current !== generation) return;
+                if (!rereadResponse.ok) throw new Error(reread.message || '局部复核未完成，本次结果未采用，当前表格保留。');
+                checkRecognitionReply(reread, expected, '复核');
+                candidate = g.OptionComboPortfolioSnapshotCodex.combine(result, reread, 'image-1');
+            }
             if (candidate.recognition.quantityCrops.length || candidate.recognition.reviewCrops.length) {
                 try {
                     const payload={image:btoa(binary),engine};
@@ -335,10 +405,13 @@
                     const reread = await rereadResponse.json();
                     if (current !== generation) return;
                     if (!rereadResponse.ok) throw new Error('数量局部重读失败');
-                    if (reread.sourceHash !== hash || reread.width !== result.width || reread.height !== result.height || reread.engine !== result.engine) throw new Error('局部重读回复与当前图片或识别引擎不一致');
-                    result.quantityRereads = reread.quantityRereads; result.reviewRereads=reread.reviewRereads; candidate = O.normalize(result, 'image-1');
+                    checkRecognitionReply(reread, expected, '复核');
+                    result.quantityRereads = reread.quantityRereads; result.reviewRereads=reread.reviewRereads; candidate = normalizeRecognition(result, 'image-1');
                 } catch (e) {
-                    if (e.name === 'AbortError' || current !== generation) throw e;
+                    // A reply for another engine/protocol/image is not a failed OCR read.
+                    // Abort this run before replacement/commit; do not adopt the first-pass
+                    // candidate through the transport-failure fallback below.
+                    if (e.name === 'AbortError' || e.code === 'ocr_reply_mismatch' || current !== generation) throw e;
                     const warning = '局部复核未完成，已保留首轮原文；未通过的行不计仓，缺失数值仍为未知，请重试或人工核对。';
                     candidate.recognition.warnings.push(warning); candidate.recognition.quantityRereadStatus = 'unavailable';
                     candidate.positions.filter(p=>p.quantity===null).forEach(p=>p.issues.push(warning));
@@ -350,6 +423,10 @@
             dirty = true; renderTable(); renderEvidence(); select(portfolioSnapshotState.positions[0]?.positionId);
             const s = C.stats(portfolioSnapshotState);
             message('已读取 ' + s.positions + ' 条原子持仓、' + s.cash + ' 条现金；' + s.summaries + ' 条分组 / 组合父行单独保留。全部待人工核对，识别完成不代表完全正确。'
+                + (engine === 'local-codex' ? ' 本次 high 推理，按原图 ' + candidate.recognition.imageInput.width + '×' + candidate.recognition.imageInput.height
+                    + ' 发送；独立局部复核' + (candidate.recognition.localReview.status === 'compared'
+                        ? '发现 ' + candidate.recognition.localReview.conflicts + ' 处冲突，保留首轮值及两次原文。'
+                        : '无法完整配对文字行，请人工核验；没有强行采用局部值。') : '')
                 + (candidate.recognition.quantityRereadStatus === 'unavailable' ? ' 局部复核未完成，请查看待判定行和缺失数值。' : ''));
         } catch (e) {
             if (current === generation) message(e.name === 'AbortError' ? '识别已超时或取消，请重试。' : e.message, true);
@@ -363,19 +440,29 @@
         $('file-mode-notice').hidden = !fileMode;
         $('open-ocr-page').hidden = !fileMode;
         $('recognize').hidden = fileMode;
-        $('recognize').disabled = !sourceFile || !available || busy || fileMode;
+        $('recognize').disabled = !sourceFile || !available || !engines[$('ocr-engine').value] || busy || fileMode;
         $('retry-service').hidden = fileMode || available || busy;
         $('retry-service').disabled = checkingService;
         $('retry-service').textContent = checkingService ? '正在连接…' : '重新连接识别服务';
         $('service-status').textContent = fileMode ? '本地文件页 · 请打开识别页面' : checkingService
-            ? '正在检查本机识别' : available ? '● 本机 OCR 已就绪' : '本机 OCR 未连接 · 查看启动说明';
+            ? '正在检查本机识别' : available ? ($('ocr-engine').value === 'local-codex' ? '● 本机 Codex 已就绪' : '● 本机 OCR 已就绪') : '本机 OCR 未连接 · 查看启动说明';
         $('service-status').classList.toggle('unavailable', !available);
         for (const option of $('ocr-engine').options) option.disabled = !engines[option.value];
+        const codexMessages = { ready: '本机 Codex 已就绪：整图与独立局部复核均用 high、原图像素；使用现有 ChatGPT 登录，图片和裁剪会发送至 OpenAI 云端模型。',
+            cli_missing: '本机 Codex 不可用：请将已安装的 codex 加入服务的 PATH，或设置 PORTFOLIO_CODEX_CLI 后重启服务。',
+            login_required: '本机 Codex 尚未通过 ChatGPT 登录，请在本机终端运行 codex login 后重试。',
+            file_login_required: '本机 Codex 需要 CLI 文件形式的 ChatGPT 登录，请在本机终端登录后重试。',
+            pillow_missing: 'Codex 图片校验需要 Pillow，请在运行服务的 Python 中安装 pillow 后重启服务。',
+            cli_unavailable: '本机 Codex 状态无法读取，请检查 CLI 和 ChatGPT 登录。' };
+        $('codex-status').textContent = codexMessages[engineStatus['local-codex']] || '若本机 Codex 选项不可用，请确认已更新并重启独立识别服务，且已安装 Codex CLI、Pillow 并通过 ChatGPT 登录。';
         $('ocr-engine').disabled = fileMode || busy || !available;
         if (!busy) $('recognize-note').textContent = fileMode ? '在新页面识别，当前内容会保留' : checkingService
             ? '正在检查本机 OCR，已载入图片会保留' : !available
                 ? '识别服务尚未连接。启动后点击「重新连接识别服务」；已载入图片会保留'
-                : !sourceFile ? '请先拖入或选择一张持仓截图' : '点击识别后，仅交给本机 OCR 处理';
+                : !sourceFile ? '请先拖入或选择一张持仓截图' : $('ocr-engine').value === 'local-codex'
+                    ? '本机 Codex 会将图片发送至 OpenAI 云端模型；使用现有 ChatGPT 登录'
+                    : '点击识别后，仅交给本机离线 OCR 处理';
+        $('processing-scope').textContent = $('ocr-engine').value === 'local-codex' ? '本机 Codex · 云端多模态' : '本机离线识别';
     }
     async function checkService() {
         if (fileMode || busy) { renderRecognitionControls(); return; }
@@ -387,11 +474,16 @@
                     const response = await fetch(candidate + '/api/capabilities', { signal: AbortSignal.timeout(4000) });
                     if (!response.ok) continue;
                     const result = await response.json();
-                    if (result.ocrAvailable === true && result.localOnly === true) {
+                    if (result.ocrAvailable === true && (result.localOnly === true || result.loopbackOnly === true)) {
                         available = true; endpoint = candidate;
                         // Older services report one engine only: Apple Vision.
                         engines = result.engines && typeof result.engines === 'object' ? { ...result.engines } : { 'apple-vision': true };
-                        if (!engines[$('ocr-engine').value]) $('ocr-engine').value = engines[result.engine] ? result.engine : Object.keys(engines).find(k => engines[k]);
+                        engineStatus = result.engineStatus || {};
+                        if (!engines[$('ocr-engine').value]) {
+                            const offline = ['rapidocr', 'apple-vision'].find(k => engines[k]);
+                            if (offline) $('ocr-engine').value = offline;
+                            // Never switch an offline selection to a cloud engine automatically.
+                        }
                         break;
                     }
                 } catch (_) { /* Try the standalone local preview service. */ }
@@ -402,16 +494,17 @@
     }
     $('drop-zone').onclick = () => $('image-file').click();
     $('drop-zone').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('image-file').click(); } };
-    $('image-file').onchange = e => { loadImage(e.target.files[0]).catch(e => message(e.message, true)); e.target.value = ''; };
+    $('image-file').onchange = e => { loadFile(e.target.files[0]).catch(e => message(e.message, true)); e.target.value = ''; };
     document.addEventListener('dragover', e => { e.preventDefault(); $('drop-zone').classList.add('dragover'); });
     document.addEventListener('dragleave', e => { if (!e.relatedTarget) $('drop-zone').classList.remove('dragover'); });
     document.addEventListener('drop', e => {
         e.preventDefault(); $('drop-zone').classList.remove('dragover');
         const files = e.dataTransfer.files;
-        if (files.length !== 1) return message('本阶段一次只识别一张图，请拖入单张图片。', true);
-        loadImage(files[0]).catch(e => message(e.message, true));
+        if (files.length !== 1) return message('请一次拖入一张图片或一个 Portfolio JSON；核验时可先拖 JSON，再拖同一原图。', true);
+        loadFile(files[0]).catch(e => message(e.message, true));
     });
     $('recognize').onclick = recognize;
+    $('ocr-engine').onchange = renderRecognitionControls;
     $('retry-service').onclick = checkService;
     $('cancel-ocr').onclick = () => { stopRecognition(); message('已取消本次识别，当前表格保留。'); };
     $('service-status').onclick = () => { document.querySelector('.service-help').open = true; checkService(); };
@@ -434,7 +527,13 @@
         if (document.querySelector('[aria-invalid="true"]')) { message('请先更正无效输入，再批量确认。', true); return; }
         const fields = C.machineChanges(portfolioSnapshotState), acknowledgement = JSON.stringify(fields);
         if (fields.length && !await confirmMachineChanges(fields)) return;
-        try { portfolioSnapshotState = C.confirmAll(portfolioSnapshotState, now(), acknowledgement); }
+        const local = C.pendingIssues(portfolioSnapshotState).filter(i => typeof i.code === 'string' && i.code.startsWith('ai_local_'));
+        if (local.length && !await confirmLocalIssues(local)) return;
+        try {
+            let next = portfolioSnapshotState;
+            for (const issue of local) next = C.acceptIssue(next, issue, '人工批量核验：保留表中当前值及两次读取证据', now());
+            portfolioSnapshotState = C.confirmAll(next, now(), acknowledgement);
+        }
         catch (e) { message(e.message, true); return; }
         dirty = true;
         renderTable(); renderEvidence(); renderEditor();
@@ -451,20 +550,56 @@
         return new Promise(resolve => { dialog.onclose = () => { resolve(dialog.returnValue === 'accept'); dialog.remove(); };
             cancel.onclick = () => dialog.close('cancel'); accept.onclick = () => dialog.close('accept'); dialog.showModal(); });
     }
+    function confirmLocalIssues(issues) {
+        const dialog = node('dialog');
+        dialog.style.cssText = 'max-width:800px;width:90%;max-height:85vh;overflow:auto;border:1px solid #d4dde4;border-radius:12px;padding:22px';
+        dialog.append(node('h3', '批量确认前，请核验整图与局部读数'),
+            node('p', '两次读数没有自动合并。请对照原图检查下列冲突或未完成项；需要改值时返回表格修改。一次确认即可，无需逐行点击。'));
+        for (const issue of issues) {
+            const line = node('div', undefined, 'source-evidence');
+            line.append(node('b', localIssueLabel(issue)), node('p', issue.message)); dialog.append(line);
+        }
+        const cancel = node('button', '返回检查'), accept = node('button', '已核验，保留当前值并批量确认', 'primary');
+        dialog.append(cancel, accept); document.body.append(dialog);
+        return new Promise(resolve => { dialog.onclose = () => { resolve(dialog.returnValue === 'accept'); dialog.remove(); };
+            cancel.onclick = () => dialog.close('cancel'); accept.onclick = () => dialog.close('accept'); dialog.showModal(); });
+    }
     function excludeSource(id) {
         const reason = prompt('请填写排除原因（例如：弹窗文字、工具栏或重复行）。原文和原因将保留。');
         if (reason === null) return;
         try { portfolioSnapshotState = C.excludeRow(portfolioSnapshotState, id, reason, now()); dirty = true; selectedId = null; renderTable(); renderEvidence(); renderEditor(); }
         catch (e) { message(e.message, true); }
     }
+    function localIssueLabel(issue) {
+        const index = portfolioSnapshotState.positions.findIndex(p => p.sourceRowIds.includes(issue.rowId));
+        const row = portfolioSnapshotState.sourceRows.find(r => r.rowId === issue.rowId);
+        return (index >= 0 ? '第 ' + (index + 1) + ' 条持仓' : row?.rowType === 'cash' ? '现金行' : '原文行')
+            + ' · ' + (row?.rawCells?.description || row?.rawText || issue.rowId);
+    }
     function renderStructureActions() {
         const target = $('structure-actions'); target.replaceChildren();
-        for (const issue of C.pendingIssues(portfolioSnapshotState)) {
-            const card = node('div', undefined, 'source-evidence'), reason = node('input'); reason.placeholder = '填写核对结论或接受不完整的原因'; reason.setAttribute('aria-label', '结构疑点核对结论');
+        const pending = C.pendingIssues(portfolioSnapshotState);
+        const local = pending.filter(i => typeof i.code === 'string' && i.code.startsWith('ai_local_'));
+        let details;
+        if (local.length) {
+            details = node('details'); details.append(node('summary', '整图与局部：' + local.length + ' 项待核验 · 展开查看'),
+                node('p', '两次读数均已保留。可定位原图检查、修改表中值，或在批量确认时一次核验全部项目。'));
+            target.append(details);
+        }
+        for (const issue of pending) {
+            const card = node('div', undefined, 'source-evidence'), reason = node('input'); reason.placeholder = '填写核对结论或接受不完整的原因'; reason.setAttribute('aria-label', '结构或读取疑点核对结论');
+            if (typeof issue.code === 'string' && issue.code.startsWith('ai_local_')) {
+                const locate = node('button', '查看原图行'); locate.onclick = () => {
+                    const p = portfolioSnapshotState.positions.find(p => p.sourceRowIds.includes(issue.rowId));
+                    if (p) { $('tab-review').click(); select(p.positionId, true); } else selectSource(issue.rowId);
+                };
+                card.append(node('b', localIssueLabel(issue)), locate);
+            }
             const accept = node('button', '已核对，接受此疑点');
             accept.onclick = () => { try { portfolioSnapshotState = C.acceptIssue(portfolioSnapshotState, issue, reason.value, now()); dirty = true; renderTable(); renderEvidence(); renderJson(); }
                 catch (e) { message(e.message, true); } };
-            card.append(node('p', issue.message), reason, accept); target.append(card);
+            card.append(node('p', issue.message), reason, accept);
+            (typeof issue.code === 'string' && issue.code.startsWith('ai_local_') ? details : target).append(card);
         }
     }
     $('exclude-position').onclick = () => { const p = portfolioSnapshotState.positions.find(p => p.positionId === selectedId); if (p) excludeSource(p.sourceRowIds[0]); };
@@ -492,19 +627,24 @@
         try {
             if (document.querySelector('[aria-invalid="true"]')) throw new Error('请先更正无效输入，再导出。');
             const snapshot = S.validate(portfolioSnapshotState);
-            const url = URL.createObjectURL(new Blob([S.serialize(snapshot)], { type: 'application/json' }));
-            const a = node('a'); a.href = url; a.download = 'portfolio-' + (snapshot.account.value || 'unassigned') + '-' + (snapshot.asOf.date || 'undated') + '.json';
+            const url = URL.createObjectURL(new Blob([readableJson(snapshot)], { type: 'application/json' }));
+            const imageName = snapshot.sources[0]?.fileName || '';
+            const a = node('a'); a.href = url; a.download = /\.(?:jpe?g|png)$/i.test(imageName) ? imageName.replace(/\.(?:jpe?g|png)$/i, '.json')
+                : 'portfolio-' + (snapshot.account.value || 'unassigned') + '-' + (snapshot.asOf.date || 'undated') + '.json';
             a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); dirty = false;
             message('已导出内存 Portfolio JSON（不含原图文件）。账号或日期留空会按未完整快照保留。');
         } catch (e) { message(e.message, true); }
     };
     $('copy-json').onclick = async () => {
-        try { await navigator.clipboard.writeText(S.serialize(portfolioSnapshotState)); message('JSON 已复制。'); }
+        try { await navigator.clipboard.writeText(readableJson(portfolioSnapshotState)); message('JSON 已复制。'); }
         catch (_) { $('json-details').open = true; renderJson(); message('无法自动复制，请从展开的 JSON 中选择复制。'); }
     };
-    $('import-json').onclick = () => $('json-file').click();
+    for (const id of ['import-json', 'import-json-secondary']) $(id).onclick = () => $('json-file').click();
     $('json-file').onchange = async e => {
         const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+        await importJson(file);
+    };
+    async function importJson(file) {
         try {
             if (file.size > S.LIMITS.jsonBytes) throw new Error('JSON 超过 32 MiB 可导入上限');
             const snapshot = S.validate(JSON.parse(await file.text()));
@@ -513,11 +653,19 @@
             stopRecognition(); if (!same) releaseImage();
             portfolioSnapshotState = snapshot; metadataInvalid = false; selectedId = null;
             $('account').value = snapshot.account.value || ''; $('account').setAttribute('aria-invalid', 'false'); $('asof').value = snapshot.asOf.date || '';
+            $('row-filter').value = 'all';
             renderTable(); renderEvidence(); select(snapshot.positions[0]?.positionId); dirty = true;
-            message(same ? 'JSON 已导入，已关联相同原图。' : 'JSON 已导入；不包含图片，请载入相同原图继续对照。');
+            $('upload-title').textContent = file.name + ' · ' + snapshot.positions.length + ' 条持仓';
+            $('upload-caption').textContent = same ? 'JSON 已载入，已关联同一原图 · 可继续拖入图片或 JSON'
+                : 'JSON 已载入 · 再拖入同一原图即可核验，无需重新识别';
+            message('已导入 ' + snapshot.positions.length + ' 条持仓。点击持仓行可查看和修改各字段；' + (same ? '已关联相同原图。' : '请再载入同一原图对照，无需重新识别。'));
+            $('review-grid').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
         } catch (error) { message('导入失败：' + error.message, true); }
-    };
+    }
     window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
     g.__portfolioSnapshot = Object.freeze({ getSnapshot: () => S.clone(portfolioSnapshotState) });
+    g.__portfolioSnapshotView = Object.freeze({
+        selectPosition: id => { if (portfolioSnapshotState.positions.some(p => p.positionId === id)) { $('tab-review').click(); select(id, true); } },
+        onChange: listener => { changeListeners.add(listener); } });
     renderTable(); renderEvidence(); checkService();
 })(typeof globalThis !== 'undefined' ? globalThis : this);

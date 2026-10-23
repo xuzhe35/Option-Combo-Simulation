@@ -649,6 +649,9 @@ IV 冲击、日期、基线、到期边界、适用范围和手算/独立参考�
 数量试调、股票期权估算、跨资产映射、NQ 更细月份曲线或更精确模型。
 各项单独定义验收后再做；不会因为已有框架就默认全部开启。
 
+已单独立项：截图 Portfolio JSON 与当前连接的 TWS 持仓（只读）比对，可选采用 TWS 值，见
+[PORTFOLIO_SNAPSHOT_TWS_CROSSCHECK_PLAN.md](PORTFOLIO_SNAPSHOT_TWS_CROSSCHECK_PLAN.md)（X0–X6）。
+
 ## 13. 验证入口与测试隔离
 
 拟建立按阶段可运行的命令，脚本交付前不得称已执行通过：

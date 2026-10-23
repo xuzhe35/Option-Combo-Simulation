@@ -68,6 +68,18 @@
             : '0.' + '0'.repeat(-cut) + digits;
         return decimal((negative ? '-' : '') + shifted);
     }
+    // TWS draws price digits after the first two decimal places in a smaller
+    // raised font. Accept that explicit transcription only in price columns;
+    // never normalize arbitrary Unicode, exponents, quantities or strikes.
+    function priceTypography(value, path) {
+        if (!['displayValues.mark', 'displayValues.avgPrice', 'displayValues.lastPrice'].includes(path) || typeof value !== 'string') return value;
+        const digits = '⁰¹²³⁴⁵⁶⁷⁸⁹';
+        return value.trim().replace(/^([+−–-]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})([⁰¹²³⁴⁵⁶⁷⁸⁹]+)$/, (_, head, tail) =>
+            head + Array.from(tail, ch => String(digits.indexOf(ch))).join(''));
+    }
+    function fieldDecimal(value, field) {
+        return decimal(priceTypography(value, field.path), field.kind === 'percent');
+    }
     function date(value) {
         if (!value) return null;
         const s = String(value);
@@ -169,5 +181,5 @@
         if (snapshot.sourceRows.some(r => r.rowType === 'cash' && !cashSources.has(r.rowId))) throw new Error('有现金源行未映射');
         return sanitizeSnapshot(snapshot);
     }
-    g.OptionComboPortfolioSnapshotSchema = Object.freeze({ LIMITS, FIELDS, clone, decimal, date, get, set, instrument, empty, validate, redactRecognition, sanitizeSnapshot, serialize, percentDisplay });
+    g.OptionComboPortfolioSnapshotSchema = Object.freeze({ LIMITS, FIELDS, clone, decimal, fieldDecimal, priceTypography, date, get, set, instrument, empty, validate, redactRecognition, sanitizeSnapshot, serialize, percentDisplay });
 })(typeof globalThis !== 'undefined' ? globalThis : this);

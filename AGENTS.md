@@ -34,11 +34,12 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 - `portfolio_snapshot.html`
   - independent screenshot Portfolio Tab, linked from `cost_basis.html`
   - loads only `portfolio_snapshot_schema.js`, `portfolio_snapshot_core.js`,
-    `portfolio_snapshot_ocr.js`, `portfolio_snapshot.js`; no trading or ledger runtime
+    `portfolio_snapshot_ocr.js`, `portfolio_snapshot_codex.js`, `portfolio_snapshot_tws_model.js`,
+    `portfolio_snapshot_tws.js`, `portfolio_snapshot.js`, `portfolio_snapshot_tws_panel.js`; no trading or ledger runtime
   - PNG/JPEG drop, original-image row crops, original OCR per field, manual corrections,
     JSON import/export; account/date manual, unknowns never zero-filled, combo parents excluded
   - optional isolated loopback preview: `python3 scripts/portfolio_snapshot_ocr_server.py`
-    at 8798; macOS offline Vision helper, no API key, no database or broker
+    at 8798; offline OCR or explicit cloud-via-Codex, no API key, no database or broker
   - engine switch: the page sends `engine` ('rapidocr' default via
     `scripts/portfolio_snapshot_rapidocr.py`, cross-platform, needs `pip install rapidocr
     onnxruntime` in the server's Python; 'apple-vision' stays selectable and is the server's
@@ -50,6 +51,43 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
     (agreement confirms; an agreed reread that contradicts the first read leaves the value
     unknown with both readings, as does DAILY P&L; no agreement is flagged unchecked). Cash keeps
     its first reading, problem and corrections in the batch confirmation. Validation §20-§22
+  - `local-codex` is an explicit third engine: `scripts/portfolio_snapshot_codex.py`
+    calls the installed CLI's stdio app-server with its file-backed ChatGPT login
+    referenced from an isolated temporary configuration; the session is ephemeral
+    and read-only. `scripts/portfolio_snapshot_codex_transport.py` pins high effort,
+    sends source-byte data URLs with original image detail, checks the actual
+    session settings and user-image echo, and refuses warnings/host/tool requests.
+    Native offline wire tests verify original byte hashes and dimensions; the
+    browser requires high/original provenance before adoption (validation §27). It sends images to OpenAI; it is not offline and never auto-falls back
+    from an offline engine. DOM-free `js/portfolio_snapshot_codex.js` validates protocol
+    3 semantic rows independently of OCR calibration, retains raw AI strings and derives
+    the combo graph. No inferred coordinates/pixel proof; all candidates need manual
+    review. Keep schema/engine/image/parent-scope guards and synthetic tests. Real-image
+    cloud testing requires user authorization for those images and destination.
+  - Codex now has a mandatory second `codexReview: {firstRunId}` phase in the page:
+    `scripts/portfolio_snapshot_codex_review.py` produces Pillow-only measured
+    full-width text-band crops, sends no first-pass values to the fresh model
+    session, and verifies every crop echo. The DOM-free `combine` checks the
+    complete row-role sequence before association; unknown alignment never
+    assigns local values. Both readings stay, first values never change.
+    Keep `recognition.localReviewIssues` separate from combo structure errors;
+    edits or an explicit batch human decision can resolve pending issues without
+    deleting history. Run local-review/transport/controller regression suites
+    when changing this path. Each phase has its own 240/255-second budget;
+    malformed replies cannot replace a previous table. Validation §28.
+  - opt-in read-only TWS comparison (`CODE PLAN/PORTFOLIO_SNAPSHOT_TWS_CROSSCHECK_PLAN.md`,
+    X0-X5 done): `js/portfolio_snapshot_tws.js` may send only the three snapshot reads
+    `request_managed_accounts_snapshot` / `request_portfolio_positions_snapshot` /
+    `request_portfolio_avg_cost_snapshot`; `ib_server_ws.py` hands unknown actions to the order
+    dispatcher, so keep that whitelist. DOM-free `js/portfolio_snapshot_tws_model.js` normalizes
+    the replies and compares; the panel never edits the JSON or writes files, and browser storage
+    holds only the last answering backend `{host, port}` (one key). Expectations in
+    `tests/fixtures/portfolio_snapshot/tws/` are hand-worked; browser checks run
+    `scripts/portfolio_snapshot_tws_browser_assertions.js` in the page against
+    `scripts/portfolio_snapshot_tws_synthetic_backend.py` (refuses 8765). The verdict only asks
+    that every screenshot position is supported by TWS (TWS-only positions are reference);
+    AVG PRICE allows TWS's display rounding (long up, short down, one shown unit). The optional
+    X6 (adopt TWS values) is not built; the comparison result is never exported
   - original screenshots under `Portfolio SC/` and real goldens/results under
     `tests/private_portfolio_snapshot/` are private and ignored; never commit them
   - read `CODE PLAN/PORTFOLIO_SCREENSHOT_OCR_PLAN.md` and its validation record;

@@ -1,0 +1,2364 @@
+{
+  "schemaVersion": 1,
+  "snapshotId": "5fcfe968-9f5d-4b5c-8a18-4cff389a2bdf",
+  "revision": 0,
+  "account": {
+    "value": "U0000002",
+    "source": "manual",
+    "confirmed": false
+  },
+  "asOf": {
+    "date": null,
+    "instant": null,
+    "timeZone": null,
+    "precision": "unknown",
+    "source": "unknown",
+    "confirmed": false
+  },
+  "createdAtUtc": "2026-10-22T22:36:19.757Z",
+  "coverage": {
+    "kind": "visible_only",
+    "userConfirmedComplete": false
+  },
+  "sources": [
+    {
+      "sourceId": "image-1",
+      "sha256": "1b36e576909323528880e48a77ca02efa24bb1b8647fa8853634e6b86fcdd073",
+      "mimeType": "image/png",
+      "width": 1600,
+      "height": 900,
+      "fileName": "synthetic-differences.png",
+      "recognitionRunId": "be331af5-d42e-49b3-a748-2f89dca172e0"
+    }
+  ],
+  "sourceRows": [
+    {
+      "rowId": "r1",
+      "sourceId": "image-1",
+      "rowType": "position",
+      "parentRowId": null,
+      "bbox": null,
+      "rawText": "ABC",
+      "rawCells": {
+        "description": "ABC",
+        "instrument.symbol": "ABC",
+        "instrument.secType": "STK",
+        "quantity": "30",
+        "instrument.expiryDate": null,
+        "instrument.right": null,
+        "instrument.strike": null,
+        "instrument.tradingClass": null,
+        "instrument.currency": null,
+        "instrument.exchange": null,
+        "instrument.multiplier": null,
+        "displayValues.mark": null,
+        "displayValues.displayIv": null,
+        "displayValues.costBasis": null,
+        "displayValues.marketValue": null,
+        "displayValues.avgPrice": "41.24",
+        "displayValues.dailyPnl": null,
+        "displayValues.unrealizedPnl": null,
+        "displayValues.deltaDollars": null,
+        "displayValues.theta": null,
+        "displayValues.lastPrice": null
+      },
+      "aiEvidence": {
+        "method": "codex_chat_visual",
+        "localization": "unavailable",
+        "partial": false,
+        "issues": []
+      }
+    },
+    {
+      "rowId": "r2",
+      "sourceId": "image-1",
+      "rowType": "position",
+      "parentRowId": null,
+      "bbox": null,
+      "rawText": "ABC 40 PUT",
+      "rawCells": {
+        "description": "ABC 40 PUT",
+        "instrument.symbol": "ABC",
+        "instrument.secType": "OPT",
+        "quantity": "-2",
+        "instrument.expiryDate": null,
+        "instrument.right": "P",
+        "instrument.strike": "40",
+        "instrument.tradingClass": null,
+        "instrument.currency": null,
+        "instrument.exchange": null,
+        "instrument.multiplier": null,
+        "displayValues.mark": null,
+        "displayValues.displayIv": null,
+        "displayValues.costBasis": null,
+        "displayValues.marketValue": null,
+        "displayValues.avgPrice": null,
+        "displayValues.dailyPnl": null,
+        "displayValues.unrealizedPnl": null,
+        "displayValues.deltaDollars": null,
+        "displayValues.theta": null,
+        "displayValues.lastPrice": null
+      },
+      "aiEvidence": {
+        "method": "codex_chat_visual",
+        "localization": "unavailable",
+        "partial": false,
+        "issues": []
+      }
+    },
+    {
+      "rowId": "r3",
+      "sourceId": "image-1",
+      "rowType": "position",
+      "parentRowId": null,
+      "bbox": null,
+      "rawText": "ZZ Dec20'30 @EXCH",
+      "rawCells": {
+        "description": "ZZ Dec20'30 @EXCH",
+        "instrument.symbol": "ZZ",
+        "instrument.secType": "FUT",
+        "quantity": "1",
+        "instrument.expiryDate": "2030-12-20",
+        "instrument.right": null,
+        "instrument.strike": null,
+        "instrument.tradingClass": null,
+        "instrument.currency": null,
+        "instrument.exchange": null,
+        "instrument.multiplier": null,
+        "displayValues.mark": null,
+        "displayValues.displayIv": null,
+        "displayValues.costBasis": null,
+        "displayValues.marketValue": null,
+        "displayValues.avgPrice": "21000.75",
+        "displayValues.dailyPnl": null,
+        "displayValues.unrealizedPnl": null,
+        "displayValues.deltaDollars": null,
+        "displayValues.theta": null,
+        "displayValues.lastPrice": null
+      },
+      "aiEvidence": {
+        "method": "codex_chat_visual",
+        "localization": "unavailable",
+        "partial": false,
+        "issues": []
+      }
+    },
+    {
+      "rowId": "r4",
+      "sourceId": "image-1",
+      "rowType": "position",
+      "parentRowId": null,
+      "bbox": null,
+      "rawText": "ZZ FOP Oct18'30 20000 PUT",
+      "rawCells": {
+        "description": "ZZ FOP Oct18'30 20000 PUT",
+        "instrument.symbol": "ZZ",
+        "instrument.secType": "FOP",
+        "quantity": "1",
+        "instrument.expiryDate": "2030-10-18",
+        "instrument.right": "P",
+        "instrument.strike": "20000",
+        "instrument.tradingClass": null,
+        "instrument.currency": null,
+        "instrument.exchange": null,
+        "instrument.multiplier": null,
+        "displayValues.mark": null,
+        "displayValues.displayIv": null,
+        "displayValues.costBasis": null,
+        "displayValues.marketValue": null,
+        "displayValues.avgPrice": null,
+        "displayValues.dailyPnl": null,
+        "displayValues.unrealizedPnl": null,
+        "displayValues.deltaDollars": null,
+        "displayValues.theta": null,
+        "displayValues.lastPrice": null
+      },
+      "aiEvidence": {
+        "method": "codex_chat_visual",
+        "localization": "unavailable",
+        "partial": false,
+        "issues": []
+      }
+    },
+    {
+      "rowId": "r5",
+      "sourceId": "image-1",
+      "rowType": "position",
+      "parentRowId": null,
+      "bbox": null,
+      "rawText": "ZZ FOP Oct18'30 20000 PUT",
+      "rawCells": {
+        "description": "ZZ FOP Oct18'30 20000 PUT",
+        "instrument.symbol": "ZZ",
+        "instrument.secType": "FOP",
+        "quantity": "-1",
+        "instrument.expiryDate": "2030-10-18",
+        "instrument.right": "P",
+        "instrument.strike": "20000",
+        "instrument.tradingClass": null,
+        "instrument.currency": null,
+        "instrument.exchange": null,
+        "instrument.multiplier": null,
+        "displayValues.mark": null,
+        "displayValues.displayIv": null,
+        "displayValues.costBasis": null,
+        "displayValues.marketValue": null,
+        "displayValues.avgPrice": null,
+        "displayValues.dailyPnl": null,
+        "displayValues.unrealizedPnl": null,
+        "displayValues.deltaDollars": null,
+        "displayValues.theta": null,
+        "displayValues.lastPrice": null
+      },
+      "aiEvidence": {
+        "method": "codex_chat_visual",
+        "localization": "unavailable",
+        "partial": false,
+        "issues": []
+      }
+    },
+    {
+      "rowId": "r6",
+      "sourceId": "image-1",
+      "rowType": "position",
+      "parentRowId": null,
+      "bbox": null,
+      "rawText": "XYZ Oct18'30 0.3 CALL",
+      "rawCells": {
+        "description": "XYZ Oct18'30 0.3 CALL",
+        "instrument.symbol": "XYZ",
+        "instrument.secType": "OPT",
+        "quantity": "5",
+        "instrument.expiryDate": "2030-10-18",
+        "instrument.right": "C",
+        "instrument.strike": "0.3",
+        "instrument.tradingClass": null,
+        "instrument.currency": null,
+        "instrument.exchange": null,
+        "instrument.multiplier": null,
+        "displayValues.mark": null,
+        "displayValues.displayIv": null,
+        "displayValues.costBasis": null,
+        "displayValues.marketValue": null,
+        "displayValues.avgPrice": "0.05¹²",
+        "displayValues.dailyPnl": null,
+        "displayValues.unrealizedPnl": null,
+        "displayValues.deltaDollars": null,
+        "displayValues.theta": null,
+        "displayValues.lastPrice": null
+      },
+      "aiEvidence": {
+        "method": "codex_chat_visual",
+        "localization": "unavailable",
+        "partial": false,
+        "issues": []
+      }
+    },
+    {
+      "rowId": "r7",
+      "sourceId": "image-1",
+      "rowType": "position",
+      "parentRowId": null,
+      "bbox": null,
+      "rawText": "DEF",
+      "rawCells": {
+        "description": "DEF",
+        "instrument.symbol": "DEF",
+        "instrument.secType": "STK",
+        "quantity": "10",
+        "instrument.expiryDate": null,
+        "instrument.right": null,
+        "instrument.strike": null,
+        "instrument.tradingClass": null,
+        "instrument.currency": null,
+        "instrument.exchange": null,
+        "instrument.multiplier": null,
+        "displayValues.mark": null,
+        "displayValues.displayIv": null,
+        "displayValues.costBasis": null,
+        "displayValues.marketValue": null,
+        "displayValues.avgPrice": null,
+        "displayValues.dailyPnl": null,
+        "displayValues.unrealizedPnl": null,
+        "displayValues.deltaDollars": null,
+        "displayValues.theta": null,
+        "displayValues.lastPrice": null
+      },
+      "aiEvidence": {
+        "method": "codex_chat_visual",
+        "localization": "unavailable",
+        "partial": false,
+        "issues": []
+      }
+    },
+    {
+      "rowId": "r8",
+      "sourceId": "image-1",
+      "rowType": "unclassified",
+      "parentRowId": null,
+      "bbox": null,
+      "rawText": "QRS Dec'30 ?? 模糊行",
+      "rawCells": {
+        "description": "QRS Dec'30 ?? 模糊行",
+        "instrument.symbol": null,
+        "instrument.secType": null,
+        "quantity": "2",
+        "instrument.expiryDate": null,
+        "instrument.right": null,
+        "instrument.strike": null,
+        "instrument.tradingClass": null,
+        "instrument.currency": null,
+        "instrument.exchange": null,
+        "instrument.multiplier": null,
+        "displayValues.mark": null,
+        "displayValues.displayIv": null,
+        "displayValues.costBasis": null,
+        "displayValues.marketValue": null,
+        "displayValues.avgPrice": null,
+        "displayValues.dailyPnl": null,
+        "displayValues.unrealizedPnl": null,
+        "displayValues.deltaDollars": null,
+        "displayValues.theta": null,
+        "displayValues.lastPrice": null
+      },
+      "aiEvidence": {
+        "method": "codex_chat_visual",
+        "localization": "unavailable",
+        "partial": false,
+        "issues": []
+      }
+    }
+  ],
+  "positions": [
+    {
+      "positionId": "chat-r1",
+      "sourceRowIds": [
+        "r1"
+      ],
+      "instrument": {
+        "secType": "STK",
+        "symbol": "ABC",
+        "currency": null,
+        "conId": null,
+        "localSymbol": null,
+        "tradingClass": null,
+        "exchange": null,
+        "expiryDate": null,
+        "expiryInstant": null,
+        "right": null,
+        "strike": null,
+        "multiplier": null,
+        "underlyingFutureRef": null
+      },
+      "quantity": "30",
+      "displayValues": {
+        "mark": null,
+        "displayIv": null,
+        "costBasis": null,
+        "marketValue": null,
+        "avgPrice": "41.24",
+        "dailyPnl": null,
+        "unrealizedPnl": null,
+        "deltaDollars": null,
+        "theta": null,
+        "lastPrice": null
+      },
+      "fieldEvidence": {
+        "instrument.symbol": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "ABC",
+          "originalValue": "ABC",
+          "recognizedValue": "ABC",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.secType": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "STK",
+          "originalValue": "STK",
+          "recognizedValue": "STK",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "quantity": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "30",
+          "originalValue": "30",
+          "recognizedValue": "30",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.expiryDate": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "到期日 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.right": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "Call / Put 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.strike": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "行权价 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.tradingClass": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易类别 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.currency": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "币种 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.exchange": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易所 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.multiplier": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "乘数 / 点值 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.mark": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MARK 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.displayIv": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "展示 IV（%） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.costBasis": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "COST BASIS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.marketValue": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MKT VALUE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.avgPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "41.24",
+          "originalValue": "41.24",
+          "recognizedValue": "41.24",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.dailyPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DAILY P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.unrealizedPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "UNRLZD P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.deltaDollars": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DELTA DLLRS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.theta": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "PTF THETA 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.lastPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "LAST（含原始前缀） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        }
+      },
+      "issues": [],
+      "reviewStatus": "unreviewed"
+    },
+    {
+      "positionId": "chat-r2",
+      "sourceRowIds": [
+        "r2"
+      ],
+      "instrument": {
+        "secType": "OPT",
+        "symbol": "ABC",
+        "currency": null,
+        "conId": null,
+        "localSymbol": null,
+        "tradingClass": null,
+        "exchange": null,
+        "expiryDate": null,
+        "expiryInstant": null,
+        "right": "P",
+        "strike": "40",
+        "multiplier": null,
+        "underlyingFutureRef": null
+      },
+      "quantity": "-2",
+      "displayValues": {
+        "mark": null,
+        "displayIv": null,
+        "costBasis": null,
+        "marketValue": null,
+        "avgPrice": null,
+        "dailyPnl": null,
+        "unrealizedPnl": null,
+        "deltaDollars": null,
+        "theta": null,
+        "lastPrice": null
+      },
+      "fieldEvidence": {
+        "instrument.symbol": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "ABC",
+          "originalValue": "ABC",
+          "recognizedValue": "ABC",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.secType": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "OPT",
+          "originalValue": "OPT",
+          "recognizedValue": "OPT",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "quantity": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "-2",
+          "originalValue": "-2",
+          "recognizedValue": "-2",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.expiryDate": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "到期日 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.right": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "P",
+          "originalValue": "P",
+          "recognizedValue": "P",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.strike": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "40",
+          "originalValue": "40",
+          "recognizedValue": "40",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.tradingClass": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易类别 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.currency": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "币种 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.exchange": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易所 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.multiplier": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "乘数 / 点值 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.mark": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MARK 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.displayIv": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "展示 IV（%） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.costBasis": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "COST BASIS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.marketValue": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MKT VALUE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.avgPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "AVG PRICE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.dailyPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DAILY P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.unrealizedPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "UNRLZD P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.deltaDollars": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DELTA DLLRS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.theta": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "PTF THETA 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.lastPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "LAST（含原始前缀） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        }
+      },
+      "issues": [],
+      "reviewStatus": "unreviewed"
+    },
+    {
+      "positionId": "chat-r3",
+      "sourceRowIds": [
+        "r3"
+      ],
+      "instrument": {
+        "secType": "FUT",
+        "symbol": "ZZ",
+        "currency": null,
+        "conId": null,
+        "localSymbol": null,
+        "tradingClass": null,
+        "exchange": null,
+        "expiryDate": "2030-12-20",
+        "expiryInstant": null,
+        "right": null,
+        "strike": null,
+        "multiplier": null,
+        "underlyingFutureRef": null
+      },
+      "quantity": "1",
+      "displayValues": {
+        "mark": null,
+        "displayIv": null,
+        "costBasis": null,
+        "marketValue": null,
+        "avgPrice": "21000.75",
+        "dailyPnl": null,
+        "unrealizedPnl": null,
+        "deltaDollars": null,
+        "theta": null,
+        "lastPrice": null
+      },
+      "fieldEvidence": {
+        "instrument.symbol": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "ZZ",
+          "originalValue": "ZZ",
+          "recognizedValue": "ZZ",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.secType": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "FUT",
+          "originalValue": "FUT",
+          "recognizedValue": "FUT",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "quantity": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "1",
+          "originalValue": "1",
+          "recognizedValue": "1",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.expiryDate": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "2030-12-20",
+          "originalValue": "2030-12-20",
+          "recognizedValue": "2030-12-20",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.right": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "Call / Put 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.strike": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "行权价 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.tradingClass": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易类别 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.currency": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "币种 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.exchange": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易所 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.multiplier": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "乘数 / 点值 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.mark": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MARK 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.displayIv": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "展示 IV（%） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.costBasis": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "COST BASIS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.marketValue": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MKT VALUE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.avgPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "21000.75",
+          "originalValue": "21000.75",
+          "recognizedValue": "21000.75",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.dailyPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DAILY P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.unrealizedPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "UNRLZD P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.deltaDollars": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DELTA DLLRS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.theta": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "PTF THETA 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.lastPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "LAST（含原始前缀） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        }
+      },
+      "issues": [],
+      "reviewStatus": "unreviewed"
+    },
+    {
+      "positionId": "chat-r4",
+      "sourceRowIds": [
+        "r4"
+      ],
+      "instrument": {
+        "secType": "FOP",
+        "symbol": "ZZ",
+        "currency": null,
+        "conId": null,
+        "localSymbol": null,
+        "tradingClass": null,
+        "exchange": null,
+        "expiryDate": "2030-10-18",
+        "expiryInstant": null,
+        "right": "P",
+        "strike": "20000",
+        "multiplier": null,
+        "underlyingFutureRef": null
+      },
+      "quantity": "1",
+      "displayValues": {
+        "mark": null,
+        "displayIv": null,
+        "costBasis": null,
+        "marketValue": null,
+        "avgPrice": null,
+        "dailyPnl": null,
+        "unrealizedPnl": null,
+        "deltaDollars": null,
+        "theta": null,
+        "lastPrice": null
+      },
+      "fieldEvidence": {
+        "instrument.symbol": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "ZZ",
+          "originalValue": "ZZ",
+          "recognizedValue": "ZZ",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.secType": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "FOP",
+          "originalValue": "FOP",
+          "recognizedValue": "FOP",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "quantity": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "1",
+          "originalValue": "1",
+          "recognizedValue": "1",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.expiryDate": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "2030-10-18",
+          "originalValue": "2030-10-18",
+          "recognizedValue": "2030-10-18",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.right": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "P",
+          "originalValue": "P",
+          "recognizedValue": "P",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.strike": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "20000",
+          "originalValue": "20000",
+          "recognizedValue": "20000",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.tradingClass": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易类别 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.currency": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "币种 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.exchange": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易所 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.multiplier": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "乘数 / 点值 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.mark": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MARK 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.displayIv": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "展示 IV（%） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.costBasis": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "COST BASIS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.marketValue": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MKT VALUE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.avgPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "AVG PRICE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.dailyPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DAILY P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.unrealizedPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "UNRLZD P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.deltaDollars": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DELTA DLLRS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.theta": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "PTF THETA 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.lastPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "LAST（含原始前缀） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        }
+      },
+      "issues": [],
+      "reviewStatus": "unreviewed"
+    },
+    {
+      "positionId": "chat-r5",
+      "sourceRowIds": [
+        "r5"
+      ],
+      "instrument": {
+        "secType": "FOP",
+        "symbol": "ZZ",
+        "currency": null,
+        "conId": null,
+        "localSymbol": null,
+        "tradingClass": null,
+        "exchange": null,
+        "expiryDate": "2030-10-18",
+        "expiryInstant": null,
+        "right": "P",
+        "strike": "20000",
+        "multiplier": null,
+        "underlyingFutureRef": null
+      },
+      "quantity": "-1",
+      "displayValues": {
+        "mark": null,
+        "displayIv": null,
+        "costBasis": null,
+        "marketValue": null,
+        "avgPrice": null,
+        "dailyPnl": null,
+        "unrealizedPnl": null,
+        "deltaDollars": null,
+        "theta": null,
+        "lastPrice": null
+      },
+      "fieldEvidence": {
+        "instrument.symbol": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "ZZ",
+          "originalValue": "ZZ",
+          "recognizedValue": "ZZ",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.secType": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "FOP",
+          "originalValue": "FOP",
+          "recognizedValue": "FOP",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "quantity": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "-1",
+          "originalValue": "-1",
+          "recognizedValue": "-1",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.expiryDate": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "2030-10-18",
+          "originalValue": "2030-10-18",
+          "recognizedValue": "2030-10-18",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.right": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "P",
+          "originalValue": "P",
+          "recognizedValue": "P",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.strike": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "20000",
+          "originalValue": "20000",
+          "recognizedValue": "20000",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.tradingClass": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易类别 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.currency": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "币种 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.exchange": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易所 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.multiplier": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "乘数 / 点值 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.mark": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MARK 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.displayIv": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "展示 IV（%） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.costBasis": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "COST BASIS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.marketValue": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MKT VALUE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.avgPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "AVG PRICE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.dailyPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DAILY P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.unrealizedPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "UNRLZD P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.deltaDollars": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DELTA DLLRS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.theta": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "PTF THETA 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.lastPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "LAST（含原始前缀） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        }
+      },
+      "issues": [],
+      "reviewStatus": "unreviewed"
+    },
+    {
+      "positionId": "chat-r6",
+      "sourceRowIds": [
+        "r6"
+      ],
+      "instrument": {
+        "secType": "OPT",
+        "symbol": "XYZ",
+        "currency": null,
+        "conId": null,
+        "localSymbol": null,
+        "tradingClass": null,
+        "exchange": null,
+        "expiryDate": "2030-10-18",
+        "expiryInstant": null,
+        "right": "C",
+        "strike": "0.3",
+        "multiplier": null,
+        "underlyingFutureRef": null
+      },
+      "quantity": "5",
+      "displayValues": {
+        "mark": null,
+        "displayIv": null,
+        "costBasis": null,
+        "marketValue": null,
+        "avgPrice": "0.0512",
+        "dailyPnl": null,
+        "unrealizedPnl": null,
+        "deltaDollars": null,
+        "theta": null,
+        "lastPrice": null
+      },
+      "fieldEvidence": {
+        "instrument.symbol": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "XYZ",
+          "originalValue": "XYZ",
+          "recognizedValue": "XYZ",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.secType": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "OPT",
+          "originalValue": "OPT",
+          "recognizedValue": "OPT",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "quantity": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "5",
+          "originalValue": "5",
+          "recognizedValue": "5",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.expiryDate": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "2030-10-18",
+          "originalValue": "2030-10-18",
+          "recognizedValue": "2030-10-18",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.right": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "C",
+          "originalValue": "C",
+          "recognizedValue": "C",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.strike": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "0.3",
+          "originalValue": "0.3",
+          "recognizedValue": "0.3",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.tradingClass": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易类别 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.currency": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "币种 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.exchange": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易所 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.multiplier": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "乘数 / 点值 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.mark": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MARK 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.displayIv": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "展示 IV（%） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.costBasis": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "COST BASIS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.marketValue": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MKT VALUE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.avgPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "0.05¹²",
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "视觉排版解读，原始文字保留；待人工核验",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "interpretation": {
+            "method": "chat_visual_typography",
+            "token": "0.05¹²",
+            "value": "0.0512",
+            "reason": "合成样例：小数点后第三、四位为上标"
+          },
+          "visualChecks": []
+        },
+        "displayValues.dailyPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DAILY P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.unrealizedPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "UNRLZD P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.deltaDollars": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DELTA DLLRS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.theta": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "PTF THETA 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.lastPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "LAST（含原始前缀） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        }
+      },
+      "issues": [],
+      "reviewStatus": "unreviewed"
+    },
+    {
+      "positionId": "chat-r7",
+      "sourceRowIds": [
+        "r7"
+      ],
+      "instrument": {
+        "secType": "STK",
+        "symbol": "DEF",
+        "currency": null,
+        "conId": null,
+        "localSymbol": null,
+        "tradingClass": null,
+        "exchange": null,
+        "expiryDate": null,
+        "expiryInstant": null,
+        "right": null,
+        "strike": null,
+        "multiplier": null,
+        "underlyingFutureRef": null
+      },
+      "quantity": "10",
+      "displayValues": {
+        "mark": null,
+        "displayIv": null,
+        "costBasis": null,
+        "marketValue": null,
+        "avgPrice": null,
+        "dailyPnl": null,
+        "unrealizedPnl": null,
+        "deltaDollars": null,
+        "theta": null,
+        "lastPrice": null
+      },
+      "fieldEvidence": {
+        "instrument.symbol": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "DEF",
+          "originalValue": "DEF",
+          "recognizedValue": "DEF",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.secType": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "STK",
+          "originalValue": "STK",
+          "recognizedValue": "STK",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "quantity": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": "10",
+          "originalValue": "10",
+          "recognizedValue": "10",
+          "problem": null,
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.expiryDate": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "到期日 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.right": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "Call / Put 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.strike": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "行权价 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.tradingClass": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易类别 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.currency": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "币种 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.exchange": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "交易所 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "instrument.multiplier": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "乘数 / 点值 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.mark": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MARK 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.displayIv": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "展示 IV（%） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.costBasis": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "COST BASIS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.marketValue": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "MKT VALUE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.avgPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "AVG PRICE 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.dailyPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DAILY P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.unrealizedPnl": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "UNRLZD P&L 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.deltaDollars": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "DELTA DLLRS 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.theta": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "PTF THETA 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        },
+        "displayValues.lastPrice": {
+          "source": "ai",
+          "method": "codex_chat_visual",
+          "raw": null,
+          "originalValue": null,
+          "recognizedValue": null,
+          "problem": "LAST（含原始前缀） 原图未提供或未读出",
+          "bbox": null,
+          "reviewStatus": "unreviewed",
+          "visualChecks": []
+        }
+      },
+      "issues": [],
+      "reviewStatus": "unreviewed"
+    }
+  ],
+  "cash": [],
+  "accountSummary": {},
+  "review": {
+    "status": "needs_review",
+    "changes": []
+  },
+  "recognition": {
+    "provider": "codex-chat-skill",
+    "model": null,
+    "reasoningEffort": null,
+    "promptVersion": "tws-screenshot-json-v1",
+    "status": "needs_review",
+    "runId": "be331af5-d42e-49b3-a748-2f89dca172e0",
+    "headers": [
+      "INSTRUMENT",
+      "POS",
+      "MARK",
+      "AVG PRICE"
+    ],
+    "originalSemantic": {
+      "headers": [
+        "INSTRUMENT",
+        "POS",
+        "MARK",
+        "AVG PRICE"
+      ],
+      "notes": [
+        "合成样例：数量漏位、符号相反、到期日缺失、交易类别缺失导致重复、多出与缺少的持仓。"
+      ],
+      "rows": [
+        {
+          "rowId": "r1",
+          "rowType": "position",
+          "description": "ABC",
+          "values": {
+            "instrument.symbol": "ABC",
+            "instrument.secType": "STK",
+            "quantity": "30",
+            "displayValues.avgPrice": "41.24"
+          }
+        },
+        {
+          "rowId": "r2",
+          "rowType": "position",
+          "description": "ABC 40 PUT",
+          "values": {
+            "instrument.symbol": "ABC",
+            "instrument.secType": "OPT",
+            "instrument.right": "P",
+            "instrument.strike": "40",
+            "quantity": "-2"
+          }
+        },
+        {
+          "rowId": "r3",
+          "rowType": "position",
+          "description": "ZZ Dec20'30 @EXCH",
+          "values": {
+            "instrument.symbol": "ZZ",
+            "instrument.secType": "FUT",
+            "instrument.expiryDate": "2030-12-20",
+            "quantity": "1",
+            "displayValues.avgPrice": "21000.75"
+          }
+        },
+        {
+          "rowId": "r4",
+          "rowType": "position",
+          "description": "ZZ FOP Oct18'30 20000 PUT",
+          "values": {
+            "instrument.symbol": "ZZ",
+            "instrument.secType": "FOP",
+            "instrument.expiryDate": "2030-10-18",
+            "instrument.right": "P",
+            "instrument.strike": "20000",
+            "quantity": "1"
+          }
+        },
+        {
+          "rowId": "r5",
+          "rowType": "position",
+          "description": "ZZ FOP Oct18'30 20000 PUT",
+          "values": {
+            "instrument.symbol": "ZZ",
+            "instrument.secType": "FOP",
+            "instrument.expiryDate": "2030-10-18",
+            "instrument.right": "P",
+            "instrument.strike": "20000",
+            "quantity": "-1"
+          }
+        },
+        {
+          "rowId": "r6",
+          "rowType": "position",
+          "description": "XYZ Oct18'30 0.3 CALL",
+          "values": {
+            "instrument.symbol": "XYZ",
+            "instrument.secType": "OPT",
+            "instrument.expiryDate": "2030-10-18",
+            "instrument.right": "C",
+            "instrument.strike": "0.3",
+            "quantity": "5",
+            "displayValues.avgPrice": "0.05¹²"
+          },
+          "interpretations": {
+            "displayValues.avgPrice": {
+              "value": "0.0512",
+              "reason": "合成样例：小数点后第三、四位为上标"
+            }
+          }
+        },
+        {
+          "rowId": "r7",
+          "rowType": "position",
+          "description": "DEF",
+          "values": {
+            "instrument.symbol": "DEF",
+            "instrument.secType": "STK",
+            "quantity": "10"
+          }
+        },
+        {
+          "rowId": "r8",
+          "rowType": "unclassified",
+          "description": "QRS Dec'30 ?? 模糊行",
+          "values": {
+            "quantity": "2"
+          }
+        }
+      ]
+    },
+    "structureIssues": [
+      {
+        "rowId": "r8",
+        "code": "chat_unclassified",
+        "message": "未确定的源行保留，待人工核验。"
+      }
+    ],
+    "warnings": [
+      "Codex 对话视觉解读；结构校验不证明识别正确；待人工核验。",
+      "合成样例：数量漏位、符号相反、到期日缺失、交易类别缺失导致重复、多出与缺少的持仓。"
+    ],
+    "imageInput": {
+      "sourceSha256": "1b36e576909323528880e48a77ca02efa24bb1b8647fa8853634e6b86fcdd073",
+      "sourceWidth": 1600,
+      "sourceHeight": 900,
+      "delivery": "chat-attachment",
+      "originalDetailVerified": false
+    },
+    "originalLines": [
+      {
+        "text": "ABC"
+      },
+      {
+        "text": "ABC 40 PUT"
+      },
+      {
+        "text": "ZZ Dec20'30 @EXCH"
+      },
+      {
+        "text": "ZZ FOP Oct18'30 20000 PUT"
+      },
+      {
+        "text": "ZZ FOP Oct18'30 20000 PUT"
+      },
+      {
+        "text": "XYZ Oct18'30 0.3 CALL"
+      },
+      {
+        "text": "DEF"
+      },
+      {
+        "text": "QRS Dec'30 ?? 模糊行"
+      }
+    ],
+    "refinements": [],
+    "quantityCrops": [],
+    "reviewCrops": [],
+    "unmatchedRows": [
+      {
+        "rowId": "r8",
+        "sourceId": "image-1",
+        "rowType": "unclassified",
+        "parentRowId": null,
+        "bbox": null,
+        "rawText": "QRS Dec'30 ?? 模糊行",
+        "rawCells": {
+          "description": "QRS Dec'30 ?? 模糊行",
+          "instrument.symbol": null,
+          "instrument.secType": null,
+          "quantity": "2",
+          "instrument.expiryDate": null,
+          "instrument.right": null,
+          "instrument.strike": null,
+          "instrument.tradingClass": null,
+          "instrument.currency": null,
+          "instrument.exchange": null,
+          "instrument.multiplier": null,
+          "displayValues.mark": null,
+          "displayValues.displayIv": null,
+          "displayValues.costBasis": null,
+          "displayValues.marketValue": null,
+          "displayValues.avgPrice": null,
+          "displayValues.dailyPnl": null,
+          "displayValues.unrealizedPnl": null,
+          "displayValues.deltaDollars": null,
+          "displayValues.theta": null,
+          "displayValues.lastPrice": null
+        },
+        "aiEvidence": {
+          "method": "codex_chat_visual",
+          "localization": "unavailable",
+          "partial": false,
+          "issues": []
+        }
+      }
+    ]
+  }
+}

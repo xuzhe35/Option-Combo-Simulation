@@ -1,0 +1,38 @@
+{
+  "_note": "合成 TWS 回复，字段形状与 ib_server.py 的 _serialize_portfolio_position_item / _serialize_portfolio_avg_cost_item / _build_managed_accounts_payload 一致。账户、合约、数量和价格均为虚构。",
+  "accounts": {"action": "managed_accounts_update", "accounts": ["U0000001", "U0000002"], "ibConnected": true, "defaultAccount": "U0000001"},
+  "positions": {
+    "action": "portfolio_positions_snapshot", "ibConnected": true, "positionsReady": true,
+    "brokerTimestamp": "2026-10-22T10:04:05", "brokerTimezone": "US/Eastern", "requestId": "REQUEST",
+    "items": [
+      {"account": "U0000001", "conId": 1003, "secType": "FUT", "symbol": "ZZ", "localSymbol": "ZZZ0", "expDate": "20301220", "right": "", "strike": 0.0, "multiplier": "20", "tradingClass": "ZZ", "position": -1.0, "averageCost": 420010.0, "avgCostPerUnit": 21000.5},
+      {"account": "U0000001", "conId": 1001, "secType": "STK", "symbol": "ABC", "localSymbol": "ABC", "expDate": "", "right": "", "strike": 0.0, "multiplier": "", "tradingClass": "ABC", "position": 300.0, "averageCost": 41.2345, "avgCostPerUnit": 41.2345},
+      {"account": "U0000002", "conId": 1001, "secType": "STK", "symbol": "ABC", "localSymbol": "ABC", "expDate": "", "right": "", "strike": 0.0, "multiplier": "", "tradingClass": "ABC", "position": 100.0, "averageCost": 40.0, "avgCostPerUnit": 40.0},
+      {"account": "U0000001", "conId": 1002, "secType": "OPT", "symbol": "ABC", "localSymbol": "ABC   301018P00040000", "expDate": "20301018", "right": "P", "strike": 40.0, "multiplier": "100", "tradingClass": "ABC", "position": -2.0, "averageCost": 123.456, "avgCostPerUnit": 1.2346},
+      {"account": "U0000001", "conId": 1005, "secType": "FOP", "symbol": "ZZ", "localSymbol": "Z3BV0 P20000", "expDate": "20301018", "right": "P", "strike": 20000.0, "multiplier": "20", "tradingClass": "Z3B", "position": -1.0, "averageCost": 3210.0, "avgCostPerUnit": 160.5},
+      {"account": "U0000001", "conId": 1004, "secType": "FOP", "symbol": "ZZ", "localSymbol": "Z3AV0 P20000", "expDate": "20301018", "right": "P", "strike": 20000.0, "multiplier": "20", "tradingClass": "Z3A", "position": 1.0, "averageCost": 3005.0, "avgCostPerUnit": 150.25},
+      {"account": "U0000001", "conId": 1006, "secType": "OPT", "symbol": "XYZ", "localSymbol": "XYZ   301018C00000300", "expDate": "20301018", "right": "C", "strike": 0.30000000000000004, "multiplier": "100", "tradingClass": "XYZ", "position": 5.0, "averageCost": 5.12, "avgCostPerUnit": 0.0512},
+      {"account": "U0000001", "conId": 1008, "secType": "CASH", "symbol": "EUR", "localSymbol": "EUR.USD", "expDate": "", "right": "", "strike": 0.0, "multiplier": "", "tradingClass": "EUR.USD", "position": 1000.0, "averageCost": 1.08, "avgCostPerUnit": 1.08},
+      {"account": "U0000001", "conId": 1007, "secType": "FUT", "symbol": "QRS", "localSymbol": "QRSZ0", "expDate": "203012", "right": "", "strike": 0.0, "multiplier": "50", "tradingClass": "QRS", "position": 2.0, "averageCost": 150000.0, "avgCostPerUnit": 3000.0}
+    ]
+  },
+  "valuations": [
+    {"action": "portfolio_avg_cost_update", "items": [
+      {"account": "U0000001", "conId": 1001, "secType": "STK", "symbol": "ABC", "localSymbol": "ABC", "expDate": "", "right": "", "strike": 0.0, "multiplier": "", "position": 300.0, "averageCost": 41.2345, "avgCostPerUnit": 41.2345, "marketPrice": 42.1, "unrealizedPNL": 259.65, "realizedPNL": 0.0},
+      {"account": "U0000001", "conId": 1002, "secType": "OPT", "symbol": "ABC", "localSymbol": "ABC   301018P00040000", "expDate": "20301018", "right": "P", "strike": 40.0, "multiplier": "100", "position": -2.0, "averageCost": 123.456, "avgCostPerUnit": 1.2346, "marketPrice": 1.05, "unrealizedPNL": 36.919999999999995, "realizedPNL": 0.0},
+      {"account": "U0000001", "conId": 1003, "secType": "FUT", "symbol": "ZZ", "localSymbol": "ZZZ0", "expDate": "20301220", "right": "", "strike": 0.0, "multiplier": "20", "position": -1.0, "averageCost": 420010.0, "avgCostPerUnit": 21000.5, "marketPrice": 21100.25, "unrealizedPNL": -1995.0, "realizedPNL": 0.0},
+      {"account": "U0000001", "conId": 1006, "secType": "OPT", "symbol": "XYZ", "localSymbol": "XYZ   301018C00000300", "expDate": "20301018", "right": "C", "strike": 0.30000000000000004, "multiplier": "100", "position": 5.0, "averageCost": 5.12, "avgCostPerUnit": 0.0512, "marketPrice": 0.06, "unrealizedPNL": 4.400000000000004, "realizedPNL": 0.0},
+      {"account": "U0000002", "conId": 1001, "secType": "STK", "symbol": "ABC", "localSymbol": "ABC", "expDate": "", "right": "", "strike": 0.0, "multiplier": "", "position": 100.0, "averageCost": 40.0, "avgCostPerUnit": 40.0, "marketPrice": 42.1, "unrealizedPNL": 210.0, "realizedPNL": 0.0}
+    ]},
+    {"action": "portfolio_avg_cost_update", "items": [
+      {"account": "U0000001", "conId": 1001, "secType": "STK", "symbol": "ABC", "localSymbol": "ABC", "expDate": "", "right": "", "strike": 0.0, "multiplier": "", "position": 300.0, "averageCost": 41.2345, "avgCostPerUnit": 41.2345, "marketPrice": 42.15, "unrealizedPNL": 274.65, "realizedPNL": 0.0}
+    ]}
+  ],
+  "variants": {
+    "notReady": {"action": "portfolio_positions_snapshot", "ibConnected": true, "positionsReady": false, "items": [], "requestId": "REQUEST"},
+    "disconnected": {"action": "portfolio_positions_snapshot", "ibConnected": false, "positionsReady": false, "items": [], "requestId": "REQUEST"},
+    "malformedItem": {"action": "portfolio_positions_snapshot", "ibConnected": true, "positionsReady": true, "requestId": "REQUEST",
+      "brokerTimestamp": "2026-10-22T10:04:05", "brokerTimezone": "US/Eastern",
+      "items": [{"account": "U0000001", "conId": 1001, "secType": "STK", "symbol": "ABC", "localSymbol": "ABC", "expDate": "", "right": "", "strike": 0.0, "multiplier": "", "tradingClass": "ABC", "position": "300 shares", "averageCost": 41.2345, "avgCostPerUnit": 41.2345}]}
+  }
+}

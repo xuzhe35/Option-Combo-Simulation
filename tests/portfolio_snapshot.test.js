@@ -119,7 +119,8 @@ module.exports = {
         { stage: 'P1', name: 'page is isolated from trading and persistence; entry opens a separate tab', run() {
             const html = fs.readFileSync(path.join(root, 'portfolio_snapshot.html'), 'utf8');
             const scripts = [...html.matchAll(/src="([^"]+\.js)(?:\?[^\"]*)?"/g)].map(m => m[1]);
-            assert.deepEqual(scripts, ['js/portfolio_snapshot_schema.js', 'js/portfolio_snapshot_core.js', 'js/portfolio_snapshot_ocr.js', 'js/portfolio_snapshot.js']);
+            assert.deepEqual(scripts, ['js/portfolio_snapshot_schema.js', 'js/portfolio_snapshot_core.js', 'js/portfolio_snapshot_ocr.js', 'js/portfolio_snapshot_codex.js',
+                'js/portfolio_snapshot_tws_model.js', 'js/portfolio_snapshot_tws.js', 'js/portfolio_snapshot.js', 'js/portfolio_snapshot_tws_panel.js']);
             const entry = fs.readFileSync(path.join(root, 'cost_basis.html'), 'utf8');
             assert.match(entry, /href="portfolio_snapshot.html" target="_blank" rel="noopener"/);
             const page = fs.readFileSync(path.join(root, 'js/portfolio_snapshot.js'), 'utf8');

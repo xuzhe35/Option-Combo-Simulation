@@ -1,0 +1,27 @@
+{
+  "headers": ["INSTRUMENT", "POS", "MARK", "AVG PRICE"],
+  "notes": ["合成样例：数量漏位、符号相反、到期日缺失、交易类别缺失导致重复、多出与缺少的持仓。"],
+  "rows": [
+    {"rowId": "r1", "rowType": "position", "description": "ABC",
+     "values": {"instrument.symbol": "ABC", "instrument.secType": "STK", "quantity": "30", "displayValues.avgPrice": "41.24"}},
+    {"rowId": "r2", "rowType": "position", "description": "ABC 40 PUT",
+     "values": {"instrument.symbol": "ABC", "instrument.secType": "OPT", "instrument.right": "P",
+                "instrument.strike": "40", "quantity": "-2"}},
+    {"rowId": "r3", "rowType": "position", "description": "ZZ Dec20'30 @EXCH",
+     "values": {"instrument.symbol": "ZZ", "instrument.secType": "FUT", "instrument.expiryDate": "2030-12-20",
+                "quantity": "1", "displayValues.avgPrice": "21000.75"}},
+    {"rowId": "r4", "rowType": "position", "description": "ZZ FOP Oct18'30 20000 PUT",
+     "values": {"instrument.symbol": "ZZ", "instrument.secType": "FOP", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "P", "instrument.strike": "20000", "quantity": "1"}},
+    {"rowId": "r5", "rowType": "position", "description": "ZZ FOP Oct18'30 20000 PUT",
+     "values": {"instrument.symbol": "ZZ", "instrument.secType": "FOP", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "P", "instrument.strike": "20000", "quantity": "-1"}},
+    {"rowId": "r6", "rowType": "position", "description": "XYZ Oct18'30 0.3 CALL",
+     "values": {"instrument.symbol": "XYZ", "instrument.secType": "OPT", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "C", "instrument.strike": "0.3", "quantity": "5", "displayValues.avgPrice": "0.05¹²"},
+     "interpretations": {"displayValues.avgPrice": {"value": "0.0512", "reason": "合成样例：小数点后第三、四位为上标"}}},
+    {"rowId": "r7", "rowType": "position", "description": "DEF",
+     "values": {"instrument.symbol": "DEF", "instrument.secType": "STK", "quantity": "10"}},
+    {"rowId": "r8", "rowType": "unclassified", "description": "QRS Dec'30 ?? 模糊行", "values": {"quantity": "2"}}
+  ]
+}

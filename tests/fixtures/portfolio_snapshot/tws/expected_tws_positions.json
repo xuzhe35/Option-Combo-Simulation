@@ -1,0 +1,33 @@
+{
+  "_note": "手算：tws_replies.json 中 U0000001 的持仓按计划 §4.1 规范化（按 conId 排序；STK/FUT 的 strike 0 与空 right 为 null；浮点按 8 位小数四舍五入去尾零；估值按 account+conId 合并、后到者覆盖）。",
+  "U0000001": {
+    "schemaVersion": 1,
+    "account": "U0000001",
+    "brokerTimestamp": "2026-10-22T10:04:05",
+    "brokerTimezone": "US/Eastern",
+    "valuation": "available",
+    "positions": [
+      {"conId": 1001, "secType": "STK", "symbol": "ABC", "localSymbol": "ABC", "tradingClass": "ABC", "expiryDate": null, "expiryMonth": null, "right": null, "strike": null, "multiplier": null, "quantity": "300", "avgPrice": "41.2345", "marketPrice": "42.15", "unrealizedPnl": "274.65"},
+      {"conId": 1002, "secType": "OPT", "symbol": "ABC", "localSymbol": "ABC   301018P00040000", "tradingClass": "ABC", "expiryDate": "2030-10-18", "expiryMonth": null, "right": "P", "strike": "40", "multiplier": "100", "quantity": "-2", "avgPrice": "1.2346", "marketPrice": "1.05", "unrealizedPnl": "36.92"},
+      {"conId": 1003, "secType": "FUT", "symbol": "ZZ", "localSymbol": "ZZZ0", "tradingClass": "ZZ", "expiryDate": "2030-12-20", "expiryMonth": null, "right": null, "strike": null, "multiplier": "20", "quantity": "-1", "avgPrice": "21000.5", "marketPrice": "21100.25", "unrealizedPnl": "-1995"},
+      {"conId": 1004, "secType": "FOP", "symbol": "ZZ", "localSymbol": "Z3AV0 P20000", "tradingClass": "Z3A", "expiryDate": "2030-10-18", "expiryMonth": null, "right": "P", "strike": "20000", "multiplier": "20", "quantity": "1", "avgPrice": "150.25", "marketPrice": null, "unrealizedPnl": null},
+      {"conId": 1005, "secType": "FOP", "symbol": "ZZ", "localSymbol": "Z3BV0 P20000", "tradingClass": "Z3B", "expiryDate": "2030-10-18", "expiryMonth": null, "right": "P", "strike": "20000", "multiplier": "20", "quantity": "-1", "avgPrice": "160.5", "marketPrice": null, "unrealizedPnl": null},
+      {"conId": 1006, "secType": "OPT", "symbol": "XYZ", "localSymbol": "XYZ   301018C00000300", "tradingClass": "XYZ", "expiryDate": "2030-10-18", "expiryMonth": null, "right": "C", "strike": "0.3", "multiplier": "100", "quantity": "5", "avgPrice": "0.0512", "marketPrice": "0.06", "unrealizedPnl": "4.4"},
+      {"conId": 1007, "secType": "FUT", "symbol": "QRS", "localSymbol": "QRSZ0", "tradingClass": "QRS", "expiryDate": null, "expiryMonth": "2030-12", "right": null, "strike": null, "multiplier": "50", "quantity": "2", "avgPrice": "3000", "marketPrice": null, "unrealizedPnl": null}
+    ],
+    "unsupported": [
+      {"conId": 1008, "secType": "CASH", "symbol": "EUR", "localSymbol": "EUR.USD", "quantity": "1000"}
+    ]
+  },
+  "U0000002": {
+    "schemaVersion": 1,
+    "account": "U0000002",
+    "brokerTimestamp": "2026-10-22T10:04:05",
+    "brokerTimezone": "US/Eastern",
+    "valuation": "available",
+    "positions": [
+      {"conId": 1001, "secType": "STK", "symbol": "ABC", "localSymbol": "ABC", "tradingClass": "ABC", "expiryDate": null, "expiryMonth": null, "right": null, "strike": null, "multiplier": null, "quantity": "100", "avgPrice": "40", "marketPrice": "42.1", "unrealizedPnl": "210"}
+    ],
+    "unsupported": []
+  }
+}

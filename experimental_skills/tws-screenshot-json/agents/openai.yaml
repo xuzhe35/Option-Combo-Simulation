@@ -1,0 +1,4 @@
+interface:
+  display_name: "TWS 截图转 JSON（实验）"
+  short_description: "直接在对话里读持仓截图，生成原图同目录同名的 JSON，拖入网页即可核验"
+  default_prompt: "使用 $tws-screenshot-json 读取我拖入的持仓截图，按需放大核对，把完整 JSON 保存到图片同目录同名，仅将扩展名改为 .json，并给我文件链接。"

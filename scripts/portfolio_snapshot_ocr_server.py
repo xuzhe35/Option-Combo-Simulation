@@ -2,9 +2,9 @@
 
 Start: python3 scripts/portfolio_snapshot_ocr_server.py
 Open: http://127.0.0.1:8798/portfolio_snapshot.html
-Engines: 'apple-vision' (macOS, compiles the Swift helper with swiftc) and 'rapidocr'
-(any platform; needs `pip install rapidocr onnxruntime` in the Python running this server). Both are
-offline; RapidOCR is the default when installed, and the page chooses one per recognition.
+Engines: offline 'apple-vision' (macOS) / 'rapidocr' (cross-platform), and explicit
+'local-codex' (installed CLI with ChatGPT login; sends images to OpenAI's cloud model).
+RapidOCR remains the default. The Codex module is independent of OCR calibration.
 """
 from __future__ import annotations
 
@@ -35,13 +35,16 @@ BUILD_DIRECTORY = tempfile.TemporaryDirectory(prefix='portfolio-ocr-build-')
 atexit.register(BUILD_DIRECTORY.cleanup)
 ASSETS = {'portfolio_snapshot.html', 'portfolio_snapshot.css', 'favicon.svg',
           'js/portfolio_snapshot_schema.js', 'js/portfolio_snapshot_core.js',
-          'js/portfolio_snapshot_ocr.js', 'js/portfolio_snapshot.js'}
-VISION, RAPIDOCR = 'apple-vision', 'rapidocr'
+          'js/portfolio_snapshot_ocr.js', 'js/portfolio_snapshot_codex.js', 'js/portfolio_snapshot.js',
+          'js/portfolio_snapshot_tws_model.js', 'js/portfolio_snapshot_tws.js', 'js/portfolio_snapshot_tws_panel.js'}
+VISION, RAPIDOCR, CODEX = 'apple-vision', 'rapidocr', 'local-codex'
 REVIEW_FIELDS = {'descriptionRow', 'avgPrice', 'dailyPnl', 'mark', 'costBasis', 'unrealizedPnl', 'deltaDollars',
                  'marketValue', 'theta', 'lastPrice', 'displayIv'}
 
 
 _ADAPTER = None
+_CODEX_ADAPTER = None
+_CODEX_REVIEW = None
 RAPIDOCR_MESSAGES = {
     'package_missing': 'RapidOCR 未安装：请在运行本服务的 Python 中执行 pip install rapidocr onnxruntime 后重启服务。',
     'model_missing': 'RapidOCR 模型文件缺失；识别时不会联网下载。请重新安装 rapidocr 后重启服务。',
@@ -68,15 +71,47 @@ def rapidocr_status():
         return 'model_invalid'
 
 
+def codex_adapter():
+    global _CODEX_ADAPTER
+    if _CODEX_ADAPTER is None:
+        spec = importlib.util.spec_from_file_location('portfolio_snapshot_codex', ROOT / 'scripts/portfolio_snapshot_codex.py')
+        _CODEX_ADAPTER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_CODEX_ADAPTER)
+    return _CODEX_ADAPTER
+
+
+def codex_status():
+    try:
+        return codex_adapter().status()
+    except (OSError, ValueError, ImportError):
+        return 'cli_unavailable'
+
+
+def recognize_codex_review(image, suffix, request, engine):
+    global _CODEX_REVIEW
+    if engine != CODEX or not isinstance(request, dict) or set(request) != {'firstRunId'}:
+        raise OcrError('codex_review_invalid', '局部复核请求或引擎无效。')
+    if _CODEX_REVIEW is None:
+        spec = importlib.util.spec_from_file_location('portfolio_codex_review', ROOT / 'scripts/portfolio_snapshot_codex_review.py')
+        _CODEX_REVIEW = importlib.util.module_from_spec(spec); spec.loader.exec_module(_CODEX_REVIEW)
+    adapter = codex_adapter()
+    try:
+        return _CODEX_REVIEW.recognize(image, suffix, request['firstRunId'], adapter)
+    except adapter.CodexError as e:
+        raise OcrError(e.code, e.message) from e
+
+
 def engines():
-    """Which offline engines this server can run, without starting either."""
-    return {VISION: sys.platform == 'darwin' and bool(shutil.which('swiftc')), RAPIDOCR: rapidocr_status() == 'ready'}
+    """Which engines this server can run; capability checks send no images."""
+    return {VISION: sys.platform == 'darwin' and bool(shutil.which('swiftc')), RAPIDOCR: rapidocr_status() == 'ready',
+            CODEX: codex_status() == 'ready'}
 
 
 def default_engine():
     # RapidOCR's cell review is the default; Apple Vision remains selectable and is the
     # fallback where RapidOCR is not installed.
     available = engines()
+    # Cloud-via-CLI is always an explicit selection, never an offline fallback.
     return RAPIDOCR if available[RAPIDOCR] else VISION if available[VISION] else None
 
 
@@ -159,6 +194,15 @@ def recognize_rapidocr(image, suffix, crops, review_crops):
 
 
 def recognize(image, suffix, crops=None, review_crops=None, engine=VISION):
+    if engine == CODEX:
+        if crops is not None or review_crops is not None:
+            raise OcrError('crops_invalid', 'Codex 使用独立多模态协议，不接受 OCR 局部复读请求。')
+        try:
+            return codex_adapter().recognize(image, suffix)
+        except codex_adapter().CodexError as exc:
+            raise OcrError(exc.code, exc.message) from exc
+    if engine not in (VISION, RAPIDOCR):
+        raise OcrError('engine_invalid', '识别引擎无效。')
     crops = validate_crops(crops)
     review_crops = validate_crops(review_crops, review=True, engine=engine)
     if engine == RAPIDOCR:
@@ -244,8 +288,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == 'api/capabilities':
             available = engines()
             return self.respond(200, {'ocrAvailable': any(available.values()), 'engines': available,
-                'engineStatus': {RAPIDOCR: rapidocr_status()},
-                'engine': default_engine(), 'localOnly': True, 'maxImageBytes': MAX_IMAGE_BYTES})
+                'engineStatus': {RAPIDOCR: rapidocr_status(), CODEX: codex_status()},
+                'engine': default_engine(), 'localOnly': not available[CODEX], 'loopbackOnly': True,
+                'engineProcessing': {VISION: 'offline', RAPIDOCR: 'offline', CODEX: 'cloud-via-local-cli'},
+                'maxImageBytes': MAX_IMAGE_BYTES})
         if path not in ASSETS:
             return self.respond(404, {'error': 'not_found'})
         content_type = 'text/html; charset=utf-8' if path.endswith('.html') else (
@@ -273,9 +319,14 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(size))
             image, suffix = decode_image(payload)
             engine = payload.get('engine') or default_engine()
-            if engine not in (VISION, RAPIDOCR):
+            if engine not in (VISION, RAPIDOCR, CODEX):
                 raise OcrError('engine_invalid', '识别引擎无效。')
-            result = recognize(image, suffix, payload.get('quantityCrops'), payload.get('reviewCrops'), engine)
+            if 'codexReview' in payload:
+                if 'quantityCrops' in payload or 'reviewCrops' in payload:
+                    raise OcrError('codex_review_invalid', '不同复核协议不能混用。')
+                result = recognize_codex_review(image, suffix, payload['codexReview'], engine)
+            else:
+                result = recognize(image, suffix, payload.get('quantityCrops'), payload.get('reviewCrops'), engine)
             result.update({'sourceHash': hashlib.sha256(image).hexdigest(), 'runId': secrets.token_hex(12),
                            'elapsedMs': round((time.monotonic() - started) * 1000)})
             self.respond(200, result)

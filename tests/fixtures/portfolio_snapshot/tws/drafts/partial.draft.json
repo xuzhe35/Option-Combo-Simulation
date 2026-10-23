@@ -1,0 +1,23 @@
+{
+  "headers": ["INSTRUMENT", "POS", "MARK", "AVG PRICE", "UNRLZD P&L"],
+  "notes": ["合成样例：只截了账户的一部分持仓；截到的每一行都与 tws_replies.json 中 U0000001 一致。"],
+  "rows": [
+    {"rowId": "r1", "rowType": "position", "description": "ABC",
+     "values": {"instrument.symbol": "ABC", "instrument.secType": "STK", "quantity": "300",
+                "displayValues.mark": "42.10", "displayValues.avgPrice": "41.24", "displayValues.unrealizedPnl": "259.65"}},
+    {"rowId": "r2", "rowType": "position", "description": "ABC Oct18'30 40 PUT",
+     "values": {"instrument.symbol": "ABC", "instrument.secType": "OPT", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "P", "instrument.strike": "40", "quantity": "-2",
+                "displayValues.mark": "1.05", "displayValues.avgPrice": "1.23"}},
+    {"rowId": "r4", "rowType": "combo_summary", "description": "ZZ Oct18'30 20000 Synthetic Pair",
+     "values": {"quantity": "1"}},
+    {"rowId": "r5", "rowType": "position", "parentRowId": "r4", "description": "ZZ FOP (Z3A) Oct18'30 20000 PUT",
+     "values": {"instrument.symbol": "ZZ", "instrument.secType": "FOP", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "P", "instrument.strike": "20000", "instrument.tradingClass": "Z3A",
+                "quantity": "1", "displayValues.mark": "150", "displayValues.avgPrice": "150.25"}},
+    {"rowId": "r6", "rowType": "position", "parentRowId": "r4", "description": "ZZ FOP (Z3B) Oct18'30 20000 PUT",
+     "values": {"instrument.symbol": "ZZ", "instrument.secType": "FOP", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "P", "instrument.strike": "20000", "instrument.tradingClass": "Z3B",
+                "quantity": "-1", "displayValues.mark": "161", "displayValues.avgPrice": "160.50"}}
+  ]
+}

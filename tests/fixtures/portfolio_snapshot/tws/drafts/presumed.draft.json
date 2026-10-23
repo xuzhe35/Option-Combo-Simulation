@@ -1,0 +1,23 @@
+{
+  "headers": ["INSTRUMENT", "POS"],
+  "notes": ["合成样例：读错代码、读错行权价、两条缺行权价的相同期权、交易类别的排除法匹配。"],
+  "rows": [
+    {"rowId": "r1", "rowType": "position", "description": "ABD",
+     "values": {"instrument.symbol": "ABD", "instrument.secType": "STK", "quantity": "300"}},
+    {"rowId": "r2", "rowType": "position", "description": "ABC Oct18'30 41 PUT",
+     "values": {"instrument.symbol": "ABC", "instrument.secType": "OPT", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "P", "instrument.strike": "41", "quantity": "-2"}},
+    {"rowId": "r3", "rowType": "position", "description": "XYZ Oct18'30 ? CALL",
+     "values": {"instrument.symbol": "XYZ", "instrument.secType": "OPT", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "C", "quantity": "5"}},
+    {"rowId": "r4", "rowType": "position", "description": "XYZ Oct18'30 ? CALL",
+     "values": {"instrument.symbol": "XYZ", "instrument.secType": "OPT", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "C", "quantity": "5"}},
+    {"rowId": "r5", "rowType": "position", "description": "ZZ FOP (Z3A) Oct18'30 20000 PUT",
+     "values": {"instrument.symbol": "ZZ", "instrument.secType": "FOP", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "P", "instrument.strike": "20000", "instrument.tradingClass": "Z3A", "quantity": "1"}},
+    {"rowId": "r6", "rowType": "position", "description": "ZZ FOP Oct18'30 20000 PUT",
+     "values": {"instrument.symbol": "ZZ", "instrument.secType": "FOP", "instrument.expiryDate": "2030-10-18",
+                "instrument.right": "P", "instrument.strike": "20000", "quantity": "-1"}}
+  ]
+}

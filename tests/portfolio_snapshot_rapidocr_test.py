@@ -26,8 +26,8 @@ def crop(field, x=0.1):
 
 
 class ServerEngines(unittest.TestCase):
-    def test_capabilities_name_both_engines(self):
-        self.assertEqual(set(SERVER.engines()), {SERVER.VISION, SERVER.RAPIDOCR})
+    def test_capabilities_name_all_three_engines(self):
+        self.assertEqual(set(SERVER.engines()), {SERVER.VISION, SERVER.RAPIDOCR, SERVER.CODEX})
 
     def test_vision_reviews_every_numeric_cell_but_not_quantity(self):
         with self.assertRaises(SERVER.OcrError):
@@ -113,8 +113,19 @@ class OfflineReadiness(unittest.TestCase):
                 ADAPTER.engine()
 
     def test_capabilities_report_the_rapidocr_status(self):
-        source = (ROOT / 'scripts/portfolio_snapshot_ocr_server.py').read_text(encoding='utf-8')
-        self.assertIn("'engineStatus': {RAPIDOCR: rapidocr_status()}", source)
+        from types import SimpleNamespace
+        captured = []
+        handler = SimpleNamespace(path='/api/capabilities', peer_allowed=lambda: True, respond=lambda status, body: captured.append(body))
+        with mock.patch.object(SERVER, 'engines', return_value={SERVER.VISION: True, SERVER.RAPIDOCR: True, SERVER.CODEX: True}), \
+                mock.patch.object(SERVER, 'rapidocr_status', return_value='ready'), \
+                mock.patch.object(SERVER, 'codex_status', return_value='ready'), \
+                mock.patch.object(SERVER, 'default_engine', return_value=SERVER.RAPIDOCR):
+            SERVER.Handler.do_GET(handler)
+        self.assertEqual(captured[0]['engineStatus'][SERVER.RAPIDOCR], 'ready')
+        self.assertEqual(captured[0]['engineStatus'][SERVER.CODEX], 'ready')
+        self.assertTrue(captured[0]['loopbackOnly'])
+        self.assertFalse(captured[0]['localOnly'])
+        self.assertEqual(captured[0]['engineProcessing'][SERVER.CODEX], 'cloud-via-local-cli')
 
 
 @unittest.skipUnless(PIXELS, 'numpy / opencv / Pillow not installed')

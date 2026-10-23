@@ -1,0 +1,66 @@
+{
+  "_note": "手算的期望比对结果（计划 §5）。每行只列结果不是 same 的字段；未列出的已比较字段都必须是 same。所选账户均为 U0000001。结论只看截图中的持仓：仅 TWS 有的持仓只作参考，不影响结论。",
+  "consistent": {
+    "verdict": "supported",
+    "accountNote": "json_missing",
+    "summary": {"exact": 7, "presumed": 0, "ambiguous": 0, "duplicateInJson": 0, "jsonOnly": 0, "twsOnly": 0, "fieldDifferences": 0},
+    "rows": [
+      {"positionId": "chat-r1", "conId": 1001, "match": "exact", "nonSame": {"instrument.multiplier": "unavailable", "displayValues.avgPrice": "within_display_precision", "displayValues.mark": "info_time_varying", "displayValues.unrealizedPnl": "info_time_varying"}},
+      {"positionId": "chat-r2", "conId": 1002, "match": "exact", "nonSame": {"instrument.tradingClass": "tws_only_value", "instrument.multiplier": "tws_only_value", "displayValues.avgPrice": "within_display_precision", "displayValues.unrealizedPnl": "tws_only_value"}},
+      {"positionId": "chat-r3", "conId": 1003, "match": "exact", "nonSame": {"instrument.tradingClass": "tws_only_value", "instrument.multiplier": "tws_only_value", "displayValues.unrealizedPnl": "tws_only_value"}},
+      {"positionId": "chat-r5", "conId": 1004, "match": "exact", "nonSame": {"instrument.multiplier": "tws_only_value", "displayValues.mark": "unavailable", "displayValues.unrealizedPnl": "unavailable"}},
+      {"positionId": "chat-r6", "conId": 1005, "match": "exact", "nonSame": {"instrument.multiplier": "tws_only_value", "displayValues.mark": "unavailable", "displayValues.unrealizedPnl": "unavailable"}},
+      {"positionId": "chat-r7", "conId": 1006, "match": "exact", "nonSame": {"instrument.tradingClass": "tws_only_value", "instrument.multiplier": "tws_only_value", "displayValues.unrealizedPnl": "tws_only_value"}},
+      {"positionId": "chat-r8", "conId": 1007, "match": "exact", "notes": ["month_level_expiry"], "nonSame": {"instrument.tradingClass": "tws_only_value", "instrument.multiplier": "tws_only_value", "displayValues.mark": "unavailable", "displayValues.unrealizedPnl": "unavailable"}}
+    ],
+    "notCompared": {"comboParents": 1, "cash": 1, "groupSummaries": 0, "unclassifiedRowIds": [], "twsUnsupportedConIds": [1008]}
+  },
+  "partial": {
+    "verdict": "supported",
+    "accountNote": "json_missing",
+    "summary": {"exact": 4, "presumed": 0, "ambiguous": 0, "duplicateInJson": 0, "jsonOnly": 0, "twsOnly": 3, "fieldDifferences": 0},
+    "rows": [
+      {"positionId": "chat-r1", "conId": 1001, "match": "exact", "nonSame": {"instrument.multiplier": "unavailable", "displayValues.avgPrice": "within_display_precision", "displayValues.mark": "info_time_varying", "displayValues.unrealizedPnl": "info_time_varying"}},
+      {"positionId": "chat-r2", "conId": 1002, "match": "exact", "nonSame": {"instrument.tradingClass": "tws_only_value", "instrument.multiplier": "tws_only_value", "displayValues.avgPrice": "within_display_precision", "displayValues.unrealizedPnl": "tws_only_value"}},
+      {"positionId": "chat-r5", "conId": 1004, "match": "exact", "nonSame": {"instrument.multiplier": "tws_only_value", "displayValues.mark": "unavailable", "displayValues.unrealizedPnl": "unavailable"}},
+      {"positionId": "chat-r6", "conId": 1005, "match": "exact", "nonSame": {"instrument.multiplier": "tws_only_value", "displayValues.mark": "unavailable", "displayValues.unrealizedPnl": "unavailable"}},
+      {"positionId": null, "conId": 1003, "match": "tws_only"},
+      {"positionId": null, "conId": 1006, "match": "tws_only"},
+      {"positionId": null, "conId": 1007, "match": "tws_only"}
+    ],
+    "notCompared": {"comboParents": 1, "cash": 0, "groupSummaries": 0, "unclassifiedRowIds": [], "twsUnsupportedConIds": [1008]}
+  },
+  "differences": {
+    "verdict": "differences",
+    "accountNote": "different",
+    "summary": {"exact": 3, "presumed": 1, "ambiguous": 0, "duplicateInJson": 2, "jsonOnly": 1, "twsOnly": 1, "fieldDifferences": 4},
+    "rows": [
+      {"positionId": "chat-r1", "conId": 1001, "match": "exact", "nonSame": {"quantity": "different", "instrument.multiplier": "unavailable", "displayValues.avgPrice": "within_display_precision", "displayValues.mark": "tws_only_value", "displayValues.unrealizedPnl": "tws_only_value"}},
+      {"positionId": "chat-r2", "conId": 1002, "match": "presumed", "differingIdentity": ["instrument.expiryDate"], "nonSame": {"instrument.expiryDate": "json_missing", "instrument.tradingClass": "tws_only_value", "instrument.multiplier": "tws_only_value", "displayValues.avgPrice": "tws_only_value", "displayValues.mark": "tws_only_value", "displayValues.unrealizedPnl": "tws_only_value"}},
+      {"positionId": "chat-r3", "conId": 1003, "match": "exact", "signOpposite": true, "nonSame": {"quantity": "different", "displayValues.avgPrice": "different", "instrument.tradingClass": "tws_only_value", "instrument.multiplier": "tws_only_value", "displayValues.mark": "tws_only_value", "displayValues.unrealizedPnl": "tws_only_value"}},
+      {"positionId": "chat-r4", "conId": null, "match": "duplicate_in_json", "candidates": [1004, 1005]},
+      {"positionId": "chat-r5", "conId": null, "match": "duplicate_in_json", "candidates": [1004, 1005]},
+      {"positionId": "chat-r6", "conId": 1006, "match": "exact", "nonSame": {"instrument.tradingClass": "tws_only_value", "instrument.multiplier": "tws_only_value", "displayValues.mark": "tws_only_value", "displayValues.unrealizedPnl": "tws_only_value"}},
+      {"positionId": "chat-r7", "conId": null, "match": "json_only"},
+      {"positionId": null, "conId": 1007, "match": "tws_only"}
+    ],
+    "notCompared": {"comboParents": 0, "cash": 0, "groupSummaries": 0, "unclassifiedRowIds": ["r8"], "twsUnsupportedConIds": [1008]}
+  },
+  "presumed": {
+    "verdict": "differences",
+    "accountNote": "json_missing",
+    "summary": {"exact": 2, "presumed": 1, "ambiguous": 2, "duplicateInJson": 0, "jsonOnly": 1, "twsOnly": 3, "fieldDifferences": 1},
+    "rows": [
+      {"positionId": "chat-r1", "conId": null, "match": "json_only"},
+      {"positionId": "chat-r2", "conId": 1002, "match": "presumed", "differingIdentity": ["instrument.strike"], "nonSame": {"instrument.strike": "different", "instrument.tradingClass": "tws_only_value", "instrument.multiplier": "tws_only_value", "displayValues.avgPrice": "tws_only_value", "displayValues.mark": "tws_only_value", "displayValues.unrealizedPnl": "tws_only_value"}},
+      {"positionId": "chat-r3", "conId": null, "match": "ambiguous", "candidates": [1006]},
+      {"positionId": "chat-r4", "conId": null, "match": "ambiguous", "candidates": [1006]},
+      {"positionId": "chat-r5", "conId": 1004, "match": "exact", "nonSame": {"instrument.multiplier": "tws_only_value", "displayValues.avgPrice": "tws_only_value", "displayValues.mark": "unavailable", "displayValues.unrealizedPnl": "unavailable"}},
+      {"positionId": "chat-r6", "conId": 1005, "match": "exact", "notes": ["matched_by_elimination"], "nonSame": {"instrument.tradingClass": "tws_only_value", "instrument.multiplier": "tws_only_value", "displayValues.avgPrice": "tws_only_value", "displayValues.mark": "unavailable", "displayValues.unrealizedPnl": "unavailable"}},
+      {"positionId": null, "conId": 1001, "match": "tws_only"},
+      {"positionId": null, "conId": 1003, "match": "tws_only"},
+      {"positionId": null, "conId": 1007, "match": "tws_only"}
+    ],
+    "notCompared": {"comboParents": 0, "cash": 0, "groupSummaries": 0, "unclassifiedRowIds": [], "twsUnsupportedConIds": [1008]}
+  }
+}
