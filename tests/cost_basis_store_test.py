@@ -9,8 +9,12 @@ idempotency, external-ref import de-duplication, append-only voiding, and
 snapshot hashing.
 """
 
+import hashlib
+import json
+import math
 import pathlib
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -41,7 +45,10 @@ from cost_basis_store import (
     contract_key,
     derive_cash_amount,
     resolve_db_path,
+    _backup_digest,
+    _backup_digest_matches,
     _exact_event_timestamp,
+    _payload_sha256,
 )
 
 
@@ -1423,6 +1430,96 @@ class ResetTests(CostBasisStoreTestBase):
         self.reviewed_reset_book(
             self.book_id, confirmation=plan['phrase'], client_token=_token())
         self.assertEqual(self.store.list_events(other['bookId'])['total'], 1)
+
+
+# The page's round trip: parse the export response, download it with
+# JSON.stringify(payload, null, 1), then parse the file and send it again.
+_THROUGH_THE_PAGE = r"""
+const file = JSON.stringify(JSON.parse(require('fs').readFileSync(0, 'utf8')), null, 1);
+process.stdout.write(JSON.stringify(JSON.parse(file)));
+"""
+
+
+def _legacy_backup_sha256(payload):
+    """The digest version-1 exports carried before whole floats were read as integers."""
+    return hashlib.sha256(json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+        allow_nan=False).encode()).hexdigest()
+
+
+class BackupFileTests(CostBasisStoreTestBase):
+    """A backup file the page downloaded has been through the browser's JSON."""
+
+    def setUp(self):
+        super().setUp()
+        self.append({'kind': 'share_trade', 'tradeDate': '2026-05-01', 'account': 'U1111111',
+                     'shares': 10.0, 'price': 500.0, 'fees': 1.0, 'cashAmount': -5001.0})
+        self.append(self.short_put())
+
+    @staticmethod
+    def through_the_page(backup):
+        done = subprocess.run(['node', '-e', _THROUGH_THE_PAGE], input=json.dumps(backup),
+                              cwd=REPO_ROOT, capture_output=True, text=True, check=True)
+        return json.loads(done.stdout)
+
+    def restore(self, backup):
+        plan = self.store.reset_confirmation(self.book_id)
+        return self._reviewed_write('restore_backup', self.book_id, backup,
+                                    confirmation=plan['phrase'], client_token=_token())
+
+    def assert_refused(self, backup):
+        before = self.store.ledger_version(self.book_id)
+        with self.assertRaisesRegex(InvalidRequestError, 'checksum mismatch'):
+            self.restore(backup)
+        self.assertEqual(self.store.ledger_version(self.book_id), before)
+
+    def test_a_backup_the_page_downloaded_restores_exactly(self):
+        backup = self.store.export_backup(self.book_id)
+        downloaded = self.through_the_page(backup)
+        share = downloaded['payload']['events'][0]
+        self.assertEqual((share['price'], share['cashAmount'], share['fees']), (500, -5001, 1))
+        self.assertIs(type(share['price']), int)
+        self.assertEqual(self.restore(downloaded)['restoredEvents'], 2)
+        restored = self.store.list_events(self.book_id, include_voided=True)['events']
+        self.assertEqual(restored, backup['payload']['events'])
+        self.assertIs(type(restored[0]['price']), float)
+
+    def test_a_changed_figure_is_refused_however_small(self):
+        downloaded = self.through_the_page(self.store.export_backup(self.book_id))
+        changes = (
+            (0, 'price', 500.01), (0, 'cashAmount', -5000), (0, 'fees', 2),
+            (1, 'price', math.nextafter(1.2, 2)), (1, 'strike', 46),
+        )
+        for index, field, value in changes:
+            with self.subTest(field=field, value=value):
+                changed = json.loads(json.dumps(downloaded))
+                changed['payload']['events'][index][field] = value
+                self.assert_refused(changed)
+
+    def test_a_backup_exported_before_the_digest_change_still_restores(self):
+        backup = self.store.export_backup(self.book_id)
+        backup['sha256'] = _legacy_backup_sha256(backup['payload'])
+        # Whole floats print differently in the two forms, so this is the old digest.
+        self.assertNotEqual(backup['sha256'], self.store.export_backup(self.book_id)['sha256'])
+        self.assertEqual(self.restore(backup)['restoredEvents'], 2)
+        downloaded = self.through_the_page(backup)
+        self.assertEqual(self.restore(downloaded)['restoredEvents'], 2)
+        self.assertEqual(self.store.list_events(self.book_id, include_voided=True)['events'],
+                         backup['payload']['events'])
+        for index, field, value in ((0, 'price', 501), (1, 'price', math.nextafter(1.2, 2))):
+            with self.subTest(field=field, value=value):
+                changed = json.loads(json.dumps(downloaded))
+                changed['payload']['events'][index][field] = value
+                self.assert_refused(changed)
+
+    def test_an_old_digest_never_rounds_a_changed_integer_onto_a_float(self):
+        original = {'events': [{'price': 1e20}]}
+        for digest in (_backup_digest(original), _payload_sha256(original)):
+            self.assertTrue(_backup_digest_matches({'events': [{'price': 10 ** 20}]},
+                                                   digest, {'price'}))
+            # float(10**20 + 1) == 1e20, so only an exact conversion is safe.
+            self.assertFalse(_backup_digest_matches({'events': [{'price': 10 ** 20 + 1}]},
+                                                    digest, {'price'}))
 
 
 class DeleteBookTests(CostBasisStoreTestBase):

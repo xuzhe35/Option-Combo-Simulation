@@ -997,6 +997,66 @@ def _json_from_snapshot(value):
     return json.loads(value, parse_constant=lambda _constant: None)
 
 
+def _payload_sha256(payload):
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         separators=(',', ':'), allow_nan=False)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _numbers_as_parsed(value):
+    """value with every whole float written as the integer a JSON parser reads."""
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _numbers_as_parsed(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_numbers_as_parsed(item) for item in value]
+    return value
+
+
+def _backup_digest(payload):
+    """The sha256 of a version-1 backup payload, the same after any JSON parser reads it back.
+
+    The page downloads a backup by parsing the export and writing it again,
+    so a stored 500.0 comes back as 500. The digest therefore reads every
+    whole float as an integer; every other number keeps its exact value
+    (JSON parsers restore the same double), so no figure can change
+    unnoticed.
+    """
+    return _payload_sha256(_numbers_as_parsed(payload))
+
+
+def _stored_real(value):
+    """An integer as the float a REAL column returned, when that float holds it exactly."""
+    if type(value) is not int:
+        return value
+    try:
+        number = float(value)
+    except OverflowError:
+        return value
+    return number if number == value else value
+
+
+def _backup_digest_matches(payload, digest, real_fields):
+    """_backup_digest, or the digest exports wrote before it.
+
+    That older digest is over Python's own number text, where every REAL
+    event figure prints as a float (500.0). It is checked with those figures
+    put back as floats, which covers a file Python wrote (nothing to put
+    back) and a file the page downloaded (500.0 already read as 500). The
+    book and ledger version carry only integers.
+    """
+    if digest == _backup_digest(payload):
+        return True
+    events = payload.get('events')
+    if isinstance(events, list):
+        events = [{key: _stored_real(item) if key in real_fields else item
+                   for key, item in row.items()} if isinstance(row, dict) else row
+                  for row in events]
+        payload = {**payload, 'events': events}
+    return digest == _payload_sha256(payload)
+
+
 def _positive_int(value, field, *, allow_none=True):
     if value is None or value == '':
         if allow_none:
@@ -4646,9 +4706,8 @@ class CostBasisStore(FopLedgerMixin):
             rows = [_event_row_to_dict(row) for row in conn.execute(
                 'SELECT * FROM cost_basis_events WHERE book_id = ? ORDER BY seq', (book_id,))]
             payload = {'book': book, 'events': rows, 'ledgerVersion': self._ledger_version(conn, book_id)}
-            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
             return {'format': 'cost-basis-backup', 'version': 1, 'payload': payload,
-                    'sha256': hashlib.sha256(encoded.encode()).hexdigest()}
+                    'sha256': _backup_digest(payload)}
         finally:
             conn.close()
 
@@ -4658,11 +4717,13 @@ class CostBasisStore(FopLedgerMixin):
         payload = backup.get('payload')
         if not isinstance(payload, dict):
             raise InvalidRequestError('backup payload is missing')
+        real_fields = {_camel(row['name']) for row in conn.execute('PRAGMA table_info(cost_basis_events)')
+                       if row['type'].upper() == 'REAL'}
         try:
-            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+            matches = _backup_digest_matches(payload, backup.get('sha256'), real_fields)
         except (ValueError, TypeError):
             raise InvalidRequestError('backup contains invalid values')
-        if hashlib.sha256(encoded.encode()).hexdigest() != backup.get('sha256'):
+        if not matches:
             raise InvalidRequestError('backup checksum mismatch; nothing restored')
         self._require_book_identity(book, payload.get('book'))
         rows = payload.get('events')
